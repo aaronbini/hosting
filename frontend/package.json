@@ -1,0 +1,36 @@
+{
+  "name": "food-event-planner-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-dialog": "^1.1.1",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.0.0",
+    "tailwind-merge": "^2.2.1",
+    "lucide-react": "^0.292.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.2.37",
+    "@types/react-dom": "^18.2.15",
+    "@vitejs/plugin-react": "^4.1.1",
+    "typescript": "^5.3.0",
+    "vite": "^5.0.0",
+    "tailwindcss": "^3.3.5",
+    "postcss": "^8.4.31",
+    "autoprefixer": "^10.4.16",
+    "eslint": "^9.0.0",
+    "eslint-plugin-react": "^7.34.0",
+    "eslint-plugin-react-hooks": "^5.0.0"
+  }
+}
