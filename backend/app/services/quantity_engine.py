@@ -15,7 +15,6 @@ Design:
 
 from ..models.shopping import DishCategory, DishServingSpec
 
-
 # ---------------------------------------------------------------------------
 # Per-person serving multipliers
 #
@@ -27,30 +26,30 @@ from ..models.shopping import DishCategory, DishServingSpec
 # ---------------------------------------------------------------------------
 
 ADULT_SERVINGS_PER_PERSON: dict[DishCategory, float] = {
-    DishCategory.MAIN_PROTEIN:        1.25,   # generous primary protein
-    DishCategory.SECONDARY_PROTEIN:   0.75,   # supplementary protein
-    DishCategory.STARCH_SIDE:         1.0,
-    DishCategory.VEGETABLE_SIDE:      1.0,
-    DishCategory.SALAD:               1.25,   # people go back for salad
-    DishCategory.BREAD:               1.5,    # rolls/slices, not loaves
-    DishCategory.DESSERT:             1.25,   # most people take dessert
-    DishCategory.PASSED_APPETIZER:    3.0,    # pieces per person
-    DishCategory.BEVERAGE_ALCOHOLIC:  2.5,    # drinks per person
+    DishCategory.MAIN_PROTEIN: 1.25,  # generous primary protein
+    DishCategory.SECONDARY_PROTEIN: 0.75,  # supplementary protein
+    DishCategory.STARCH_SIDE: 1.0,
+    DishCategory.VEGETABLE_SIDE: 1.0,
+    DishCategory.SALAD: 1.25,  # people go back for salad
+    DishCategory.BREAD: 1.5,  # rolls/slices, not loaves
+    DishCategory.DESSERT: 1.25,  # most people take dessert
+    DishCategory.PASSED_APPETIZER: 3.0,  # pieces per person
+    DishCategory.BEVERAGE_ALCOHOLIC: 2.5,  # drinks per person
     DishCategory.BEVERAGE_NONALCOHOLIC: 3.0,  # glasses per person
 }
 
 # Children eat roughly 60% of an adult portion for food, same for non-alcoholic
 # beverages; alcoholic beverages are 0 for children.
 CHILD_SERVINGS_PER_PERSON: dict[DishCategory, float] = {
-    DishCategory.MAIN_PROTEIN:          0.75,
-    DishCategory.SECONDARY_PROTEIN:     0.50,
-    DishCategory.STARCH_SIDE:           0.75,
-    DishCategory.VEGETABLE_SIDE:        0.50,
-    DishCategory.SALAD:                 0.50,
-    DishCategory.BREAD:                 1.0,
-    DishCategory.DESSERT:               1.0,   # kids always want dessert
-    DishCategory.PASSED_APPETIZER:      2.0,
-    DishCategory.BEVERAGE_ALCOHOLIC:    0.0,   # no alcohol for children
+    DishCategory.MAIN_PROTEIN: 0.75,
+    DishCategory.SECONDARY_PROTEIN: 0.50,
+    DishCategory.STARCH_SIDE: 0.75,
+    DishCategory.VEGETABLE_SIDE: 0.50,
+    DishCategory.SALAD: 0.50,
+    DishCategory.BREAD: 1.0,
+    DishCategory.DESSERT: 1.0,  # kids always want dessert
+    DishCategory.PASSED_APPETIZER: 2.0,
+    DishCategory.BEVERAGE_ALCOHOLIC: 0.0,  # no alcohol for children
     DishCategory.BEVERAGE_NONALCOHOLIC: 3.0,
 }
 
@@ -113,7 +112,5 @@ def calculate_all_serving_specs(
         if category is None:
             # Default to starch_side if categorisation failed — better than crashing
             category = DishCategory.STARCH_SIDE
-        specs.append(
-            calculate_dish_serving_spec(dish, category, adult_count, child_count)
-        )
+        specs.append(calculate_dish_serving_spec(dish, category, adult_count, child_count))
     return specs

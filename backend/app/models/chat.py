@@ -1,6 +1,7 @@
-from typing import Optional
-from pydantic import BaseModel
 from enum import Enum
+from typing import Optional
+
+from pydantic import BaseModel
 
 
 class MessageRole(str, Enum):
@@ -10,12 +11,14 @@ class MessageRole(str, Enum):
 
 class ChatMessage(BaseModel):
     """Individual chat message"""
+
     role: MessageRole
     content: str
 
 
 class ChatRequest(BaseModel):
     """Request body for chat endpoint"""
+
     session_id: str
     message: str
     ai_provider: Optional[str] = "gemini"  # TODO: Support multiple providers
@@ -23,6 +26,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     """Response body for chat endpoint"""
+
     session_id: str
     message: str
     completion_score: float

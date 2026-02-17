@@ -1,4 +1,6 @@
 import { RefObject } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { Message } from '../types'
 
 interface Props {
@@ -37,12 +39,16 @@ export default function ChatMessages({ messages, isLoading, messagesEndRef }: Pr
                     : 'bg-white text-slate-900 border border-slate-200 rounded-bl-none'
                 }`}
               >
-                <p className="text-sm">
-                  {msg.content}
+                <div
+                  className={`text-sm chat-markdown ${msg.role === 'user' ? 'chat-markdown--user' : ''}`}
+                >
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {msg.content}
+                  </ReactMarkdown>
                   {isLastAssistant && (
                     <span className="inline-block w-0.5 h-3.5 bg-slate-500 ml-0.5 align-middle animate-pulse" />
                   )}
-                </p>
+                </div>
                 {msg.timestamp && (
                   <p className={`text-xs mt-1 ${
                     msg.role === 'user' ? 'text-indigo-100' : 'text-slate-400'

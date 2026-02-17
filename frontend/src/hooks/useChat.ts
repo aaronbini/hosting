@@ -6,6 +6,10 @@ type WebSocketMessage =
   | { type: 'stream_chunk'; data: { text: string } }
   | { type: 'stream_end' }
   | { type: 'error'; data: { error: string } }
+  | { type: 'agent_progress'; stage: string; message: string }
+  | { type: 'agent_review'; stage: string; message: string; shopping_list?: unknown }
+  | { type: 'agent_complete'; stage: string; formatted_output?: string; google_sheet_url?: string | null; google_keep_url?: string | null }
+  | { type: 'agent_error'; stage: string; message: string }
 
 interface UseChatReturn {
   messages: Message[]
@@ -14,9 +18,11 @@ interface UseChatReturn {
   eventData: EventData | null
   completionScore: number
   isComplete: boolean
+  isAwaitingReview: boolean
   connect: () => WebSocket | undefined
   sendMessage: (message: string) => void
   sendMessageRest: (message: string) => Promise<void>
+  approveShoppingList: () => void
   isConnected: boolean
 }
 
@@ -35,6 +41,33 @@ export const useChat = (sessionId: string): UseChatReturn => {
   const [completionScore, setCompletionScore] = useState(0)
   const [isComplete, setIsComplete] = useState(false)
   const [ws, setWs] = useState<WebSocket | null>(null)
+  const [isAwaitingReview, setIsAwaitingReview] = useState(false)
+
+  const formatShoppingListForChat = (shoppingList: any): string | null => {
+    if (!shoppingList?.grouped || typeof shoppingList.grouped !== 'object') return null
+
+    const lines: string[] = ['Shopping List:']
+    for (const [category, items] of Object.entries(shoppingList.grouped)) {
+      const label = String(category).replace(/_/g, ' ')
+      lines.push(`\n${label.charAt(0).toUpperCase()}${label.slice(1)}`)
+
+      if (Array.isArray(items)) {
+        for (const item of items) {
+          const name = item?.name ?? 'Item'
+          const qty = item?.total_quantity ?? item?.quantity
+          const unit = item?.unit?.value ?? item?.unit
+          const qtyStr = typeof qty === 'number'
+            ? `${Math.ceil(qty)}`
+            : (qty != null ? String(qty) : '')
+          const unitStr = unit ? ` ${unit}` : ''
+          const detail = qtyStr ? `: ${qtyStr}${unitStr}` : ''
+          lines.push(`- ${name}${detail}`)
+        }
+      }
+    }
+
+    return lines.join('\n')
+  }
 
   const connect = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -69,6 +102,42 @@ export const useChat = (sessionId: string): UseChatReturn => {
           setIsLoading(false)
         } else if (data.type === 'error') {
           setError(data.data.error)
+          setIsLoading(false)
+        } else if (data.type === 'agent_progress') {
+          setMessages(prev => [...prev, {
+            role: 'assistant',
+            content: data.message || 'Working... ',
+            timestamp: new Date()
+          }])
+        } else if (data.type === 'agent_review') {
+          const listText = formatShoppingListForChat(data.shopping_list)
+          const content = listText
+            ? `${data.message}\n\n${listText}`
+            : data.message
+          setMessages(prev => [...prev, {
+            role: 'assistant',
+            content,
+            timestamp: new Date()
+          }])
+          setIsAwaitingReview(true)
+          setIsLoading(false)
+        } else if (data.type === 'agent_complete') {
+          const extraLinks: string[] = []
+          if (data.google_sheet_url) extraLinks.push(`Google Sheet: ${data.google_sheet_url}`)
+          if (data.google_keep_url) extraLinks.push(`Google Keep: ${data.google_keep_url}`)
+          const content = [data.formatted_output || 'Your results are ready.', ...extraLinks]
+            .filter(Boolean)
+            .join('\n\n')
+          setMessages(prev => [...prev, {
+            role: 'assistant',
+            content,
+            timestamp: new Date()
+          }])
+          setIsAwaitingReview(false)
+          setIsLoading(false)
+        } else if (data.type === 'agent_error') {
+          setError(data.message || 'Agent error occurred')
+          setIsAwaitingReview(false)
           setIsLoading(false)
         }
       }
@@ -149,6 +218,12 @@ export const useChat = (sessionId: string): UseChatReturn => {
     }
   }, [sessionId])
 
+  const approveShoppingList = useCallback(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    setIsAwaitingReview(false)
+    ws.send(JSON.stringify({ type: 'approve' }))
+  }, [ws])
+
   return {
     messages,
     isLoading,
@@ -156,9 +231,11 @@ export const useChat = (sessionId: string): UseChatReturn => {
     eventData,
     completionScore,
     isComplete,
+    isAwaitingReview,
     connect,
     sendMessage,
     sendMessageRest,
+    approveShoppingList,
     isConnected: ws?.readyState === WebSocket.OPEN
   }
 }
