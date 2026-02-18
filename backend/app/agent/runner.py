@@ -70,7 +70,7 @@ async def run_agent(
         1. calculate_quantities      → DishServingSpec per dish
         2. get_all_dish_ingredients  → DishIngredients per dish (parallel)
         3. aggregate_ingredients     → ShoppingList
-        4. → client: agent_review + shopping list        ┐
+        4. → client: agent_review + shopping list         ┐
         5. ← client: user approval / corrections          │ loop until approved
         6. apply_corrections → revised ShoppingList       │
            → client: agent_review + revised list          ┘

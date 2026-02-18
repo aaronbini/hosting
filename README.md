@@ -5,41 +5,31 @@ A full-stack AI-powered assistant for planning food events of any type. Built wi
 ## Project Structure
 
 ```
-bbq/
+hosting/
 ├── ARCHITECTURE.md          # Detailed architecture documentation
 ├── backend/                 # Python FastAPI backend
-│   ├── app/
-│   │   ├── main.py         # FastAPI application
-│   │   ├── models/
-│   │   │   ├── event.py    # Pydantic models for event data
-│   │   │   └── chat.py     # Chat message models
-│   │   └── services/
-│   │       ├── ai_service.py              # Gemini AI integration
-│   │       ├── session_manager.py         # Session management
-│   │       └── conversation_analyzer.py   # NLP for extracting event data
-│   ├── requirements.txt
-│   └── .env.example
+│   ├── pyproject.toml       # Python dependencies (Poetry/PEP 621)
+│   └── app/
+│       ├── main.py          # FastAPI application
+│       ├── agent/           # Agent pipeline (steps + runner)
+│       ├── models/          # Pydantic models (event, chat, shopping)
+│       └── services/        # AI service + quantity engine + sessions
 └── frontend/                # Vite + React frontend
-    ├── src/
-    │   ├── components/
-    │   │   ├── ChatInterface.jsx    # Main chat component
-    │   │   ├── ChatMessages.jsx     # Message display
-    │   │   ├── ChatInput.jsx        # Input component
-    │   │   └── EventDataPanel.jsx   # Sidebar showing extracted data
-    │   ├── hooks/
-    │   │   └── useChat.js           # Chat state management
-    │   ├── App.jsx
-    │   ├── main.jsx
-    │   └── styles.css
-    ├── package.json
-    ├── vite.config.js
-    └── index.html
+  ├── index.html
+  ├── package.json
+  ├── vite.config.ts
+  └── src/
+    ├── components/      # Chat UI + panels
+    ├── hooks/           # useChat WebSocket logic
+    ├── App.tsx
+    ├── main.tsx
+    └── styles.css
 ```
 
 ## Quick Start
 
 ### Prerequisites
-- Python 3.8+
+- Python 3.10+
 - Node.js 18+
 - Google API Key for Gemini
 
@@ -56,15 +46,15 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-3. Install dependencies:
+3. Install dependencies with uv:
+
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
-4. Create `.env` file from example and add your Google API key:
+4. Set your Google API key:
 ```bash
-cp .env.example .env
-# Edit .env and add: GOOGLE_API_KEY=your_key_here
+export GOOGLE_API_KEY=your_key_here
 ```
 
 5. Run the server:
@@ -100,6 +90,7 @@ The frontend will be available at `http://localhost:5173`
 - **Session-based conversations** with in-memory storage (TODO: persistent datastore)
 - **WebSocket support** for real-time chat with REST fallback
 - **Automatic data extraction** from user messages
+- **Agent pipeline** that builds a shopping list after menu/recipe confirmation
 
 ### Event Data Tracking
 - Pydantic models for type-safe event data
@@ -117,8 +108,9 @@ The frontend will be available at `http://localhost:5173`
 - **Tailwind CSS** for styling
 - **Lucide React** for icons
 - **WebSocket chat** with fallback to REST
+- **Markdown rendering** for assistant responses
 - **Real-time event data sidebar** showing extracted information
-- **Completion progress bar** indicating when we have enough info
+- **Completion progress indicator**
 - Mobile-responsive design
 
 ## TODO Items
@@ -193,15 +185,9 @@ Response: { "message": "Session deleted" }
 WS /ws/chat/{session_id}
 
 Client sends: { "type": "message", "data": "user message" }
-Server responds: {
-  "type": "response",
-  "data": {
-    "message": "assistant response",
-    "completion_score": 0.6,
-    "is_complete": false,
-    "event_data": {...}
-  }
-}
+Server responds with streaming and agent messages:
+- stream_start / stream_chunk / stream_end
+- agent_progress / agent_review / agent_complete / agent_error
 ```
 
 ## Development Notes
