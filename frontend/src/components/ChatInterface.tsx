@@ -3,6 +3,7 @@ import { useChat } from '../hooks/useChat'
 import ChatMessages from './ChatMessages'
 import ChatInput from './ChatInput'
 import EventDataPanel from './EventDataPanel'
+import RecipeUploadPanel from './RecipeUploadPanel'
 
 interface Props {
   sessionId: string
@@ -16,9 +17,11 @@ export default function ChatInterface({ sessionId }: Props) {
     eventData,
     completionScore,
     isComplete,
+    isAwaitingReview,
     connect,
     sendMessage,
     sendMessageRest,
+    approveShoppingList,
     isConnected
   } = useChat(sessionId)
 
@@ -68,6 +71,33 @@ export default function ChatInterface({ sessionId }: Props) {
           isLoading={isLoading}
           messagesEndRef={messagesEndRef}
         />
+
+        {/* Recipe upload — visible during recipe_confirmation or when a file upload is pending */}
+        {eventData && (eventData.conversation_stage === 'recipe_confirmation' || !!eventData.pending_upload_dish) && (
+          <RecipeUploadPanel
+            sessionId={sessionId}
+            mealPlan={eventData.meal_plan}
+            pendingDish={eventData.pending_upload_dish}
+            onUploadComplete={(dishName) =>
+              handleSendMessage(`I uploaded a recipe file for ${dishName}.`)
+            }
+          />
+        )}
+
+        {/* Approve button — visible while agent awaits review */}
+        {isAwaitingReview && (
+          <div className="border-t border-slate-200 bg-green-50 px-4 py-3 flex items-center gap-3">
+            <p className="text-sm text-slate-600 flex-1">
+              Looks good? Approve the list to continue, or type corrections below.
+            </p>
+            <button
+              onClick={approveShoppingList}
+              className="px-5 py-2 text-sm font-medium rounded bg-green-600 text-white hover:bg-green-700 transition-colors"
+            >
+              Approve
+            </button>
+          </div>
+        )}
 
         {/* Input Area */}
         <ChatInput

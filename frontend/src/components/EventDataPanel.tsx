@@ -18,9 +18,23 @@ export default function EventDataPanel({ eventData, completionScore, isComplete 
     return 'bg-slate-400'
   }
 
+  const stageLabels: Record<string, string> = {
+    gathering: 'Gathering Info',
+    recipe_confirmation: 'Confirming Recipes',
+    selecting_output: 'Choosing Output',
+    agent_running: 'Calculating...',
+  }
+
   return (
     <div className="w-80 bg-white border-l border-slate-200 p-6 overflow-y-auto shadow-lg">
       <h2 className="text-xl font-bold text-slate-900 mb-6">Event Details</h2>
+
+      {/* Conversation Stage */}
+      <div className="mb-4">
+        <span className="text-xs font-semibold text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
+          {stageLabels[eventData.conversation_stage] || eventData.conversation_stage}
+        </span>
+      </div>
 
       {/* Completion Progress */}
       <div className="mb-6">
@@ -37,7 +51,7 @@ export default function EventDataPanel({ eventData, completionScore, isComplete 
           ></div>
         </div>
         {isComplete && (
-          <p className="text-sm text-green-600 font-medium mt-2">✓ Ready to plan!</p>
+          <p className="text-sm text-green-600 font-medium mt-2">Ready to plan!</p>
         )}
       </div>
 
@@ -56,10 +70,6 @@ export default function EventDataPanel({ eventData, completionScore, isComplete 
             label="Total Guests"
             value={`${eventData.total_guests} (${eventData.adult_count} adults, ${eventData.child_count} children)`}
           />
-        )}
-
-        {eventData.venue_type && (
-          <DetailItem label="Venue" value={eventData.venue_type} />
         )}
 
         {eventData.formality_level && (
@@ -108,6 +118,20 @@ export default function EventDataPanel({ eventData, completionScore, isComplete 
                 </span>
               ))}
             </div>
+          </div>
+        )}
+
+        {eventData.meal_plan && eventData.meal_plan.length > 0 && (
+          <div className="pt-4 border-t border-slate-200">
+            <p className="text-sm font-semibold text-slate-700 mb-2">Menu</p>
+            <ul className="space-y-1">
+              {eventData.meal_plan.map((dish: string, idx: number) => (
+                <li key={idx} className="text-sm text-slate-600 flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full flex-shrink-0"></span>
+                  {dish}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
       </div>

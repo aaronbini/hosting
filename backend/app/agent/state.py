@@ -10,10 +10,11 @@ Design notes:
 """
 
 from typing import Optional
+
 from pydantic import BaseModel, Field
 
 from app.models.event import EventPlanningData, OutputFormat
-from app.models.shopping import DishServingSpec, DishIngredients, ShoppingList
+from app.models.shopping import DishIngredients, DishServingSpec, ShoppingList
 
 
 class AgentStage(str):
@@ -22,6 +23,7 @@ class AgentStage(str):
     Not an Enum so that LangGraph edge conditions can do simple string
     comparisons without importing the class.
     """
+
     IDLE = "idle"
     CALCULATING_QUANTITIES = "calculating_quantities"
     GETTING_INGREDIENTS = "getting_ingredients"

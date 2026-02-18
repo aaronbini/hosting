@@ -1,5 +1,6 @@
 from enum import Enum
-from typing import Optional, List, Dict
+from typing import Dict, List, Optional
+
 from pydantic import BaseModel
 
 
@@ -58,6 +59,7 @@ class QuantityUnit(str, Enum):
 
 class RecipeIngredient(BaseModel):
     """A single ingredient in a recipe."""
+
     name: str
     quantity: float
     unit: QuantityUnit
@@ -67,6 +69,7 @@ class RecipeIngredient(BaseModel):
 
 class DishServingSpec(BaseModel):
     """How many servings of a dish are needed, based on lookup table + guest counts."""
+
     dish_name: str
     dish_category: DishCategory
     adult_servings: float
@@ -76,6 +79,7 @@ class DishServingSpec(BaseModel):
 
 class DishIngredients(BaseModel):
     """All ingredients required to make a specific dish at a specific serving count."""
+
     dish_name: str
     serving_spec: DishServingSpec
     ingredients: List[RecipeIngredient]
@@ -83,15 +87,17 @@ class DishIngredients(BaseModel):
 
 class AggregatedIngredient(BaseModel):
     """A single ingredient after deduplication and summing across all dishes."""
+
     name: str
     total_quantity: float
     unit: QuantityUnit
     grocery_category: GroceryCategory
-    appears_in: List[str]   # list of dish names
+    appears_in: List[str]  # list of dish names
 
 
 class ShoppingList(BaseModel):
     """Final output: all ingredients aggregated, deduplicated, and grouped."""
+
     meal_plan: List[str]
     adult_count: int
     child_count: int

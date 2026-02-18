@@ -1,5 +1,5 @@
-from .event import EventPlanningData, DietaryRestriction
 from .chat import ChatMessage, ChatRequest, ChatResponse
+from .event import DietaryRestriction, EventPlanningData
 
 __all__ = [
     "EventPlanningData",

@@ -18,7 +18,9 @@ export interface EventData {
   foods_to_avoid: string[]
   available_equipment: string[]
   formality_level?: string
-  venue_type?: string
+  meal_plan: string[]
+  recipe_promises: string[]
+  pending_upload_dish?: string
   budget?: number
   budget_per_person?: number
   conversation_stage: string
