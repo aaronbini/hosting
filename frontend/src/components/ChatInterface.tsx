@@ -94,12 +94,11 @@ export default function ChatInterface({ sessionId }: Props) {
           messagesEndRef={messagesEndRef}
         />
 
-        {/* Recipe upload — visible during recipe_confirmation, when promises are pending, or when a file upload is pending */}
-        {eventData && (eventData.conversation_stage === 'recipe_confirmation' || (eventData.recipe_promises && eventData.recipe_promises.length > 0) || !!eventData.pending_upload_dish) && (
+        {/* Recipe upload — visible only while there are recipes awaiting user input */}
+        {eventData && eventData.meal_plan?.recipes.filter(r => r.awaiting_user_input).length > 0 && (
           <RecipeUploadPanel
             sessionId={sessionId}
-            mealPlan={eventData.meal_plan}
-            pendingDish={eventData.pending_upload_dish}
+            recipes={eventData.meal_plan.recipes.filter(r => r.awaiting_user_input)}
             onUploadComplete={(dishName) =>
               handleSendMessage(`I uploaded a recipe file for ${dishName}.`)
             }
@@ -109,12 +108,17 @@ export default function ChatInterface({ sessionId }: Props) {
         {/* Connect Google — visible during output selection when Google Tasks is chosen */}
         {needsGoogleAuth && (
           <div className="border-t border-slate-200 bg-blue-50 px-4 py-3 flex items-center gap-3">
-            <p className="text-sm text-slate-600 flex-1">
-              Google Tasks selected — connect your Google account to deliver the list.
-            </p>
+            <div className="flex-1">
+              <p className="text-sm text-slate-600">
+                Google Tasks selected — connect your Google account to deliver the list.
+              </p>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Only used to create a new task list. Cannot read, edit, or delete your existing tasks.
+              </p>
+            </div>
             <button
               onClick={handleConnectGoogle}
-              className="px-5 py-2 text-sm font-medium rounded bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+              className="px-5 py-2 text-sm font-medium rounded bg-blue-600 text-white hover:bg-blue-700 transition-colors shrink-0"
             >
               Connect Google
             </button>

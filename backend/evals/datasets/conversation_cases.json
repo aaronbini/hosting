@@ -1,0 +1,65 @@
+[
+  {
+    "id": "initial_greeting_asks_key_questions",
+    "description": "First message should gather essential info",
+    "user_message": "Hi, I want to plan a dinner party",
+    "context": {"conversation_stage": "gathering", "adult_count": null, "event_type": null},
+    "rubric": "Response should ask for guest count and/or event type. Should be warm and welcoming. Should NOT ask multiple questions at once."
+  },
+  {
+    "id": "suggests_menu_when_asked",
+    "description": "When asked for menu suggestions, provides specific dishes",
+    "user_message": "Can you suggest a menu? We're doing Italian.",
+    "context": {
+      "conversation_stage": "gathering",
+      "adult_count": 8,
+      "event_type": "dinner-party",
+      "cuisine_preferences": ["Italian"]
+    },
+    "rubric": "Response must suggest at least 3 specific dishes (not generic categories). Dishes should be Italian. Should not suggest the same ultra-generic options every time (e.g., always 'spaghetti carbonara + tiramisu')."
+  },
+  {
+    "id": "handles_recipe_url_gracefully",
+    "description": "When user provides a recipe URL, responds appropriately",
+    "user_message": "Here's my pasta recipe: https://example.com/recipe",
+    "context": {
+      "conversation_stage": "recipe_confirmation",
+      "last_url_extraction_result": {"success": true, "dish": "Pasta", "ingredient_count": 8}
+    },
+    "rubric": "Response should acknowledge the recipe was received. Should move conversation forward (ask about other dishes or confirm). Should NOT ask the user to provide the recipe again."
+  },
+  {
+    "id": "handles_failed_url_gracefully",
+    "description": "When URL extraction fails, asks user for alternative",
+    "user_message": "Here's my recipe: https://some-site.com/blocked-page",
+    "context": {
+      "conversation_stage": "recipe_confirmation",
+      "last_url_extraction_result": {"success": false, "error": "Could not access URL"}
+    },
+    "rubric": "Response should explain the URL couldn't be read. Should offer alternatives (paste description, upload file). Should be sympathetic, not robotic."
+  },
+  {
+    "id": "presents_ingredient_list_without_quantities",
+    "description": "In recipe_confirmation, shows ingredient names only",
+    "user_message": "What ingredients do you have for the pasta?",
+    "context": {
+      "conversation_stage": "recipe_confirmation",
+      "last_generated_recipes": [
+        {
+          "dish": "Pasta Carbonara",
+          "ingredients": ["pasta", "eggs", "guanciale", "Pecorino Romano", "black pepper"]
+        }
+      ]
+    },
+    "rubric": "Response must show ingredient names in a bullet list. Must NOT include quantities or measurements (no '200g', '2 cups', etc.). Should ask if the ingredient list looks correct."
+  },
+  {
+    "id": "collecting_output_format_preference",
+    "description": "In selecting_output stage, presents options clearly",
+    "user_message": "Ok I'm happy with the menu",
+    "context": {
+      "conversation_stage": "selecting_output"
+    },
+    "rubric": "Response should clearly explain the available output formats (in-chat list, Google Tasks). Should ask which format the user prefers. Should not start generating the shopping list yet."
+  }
+]

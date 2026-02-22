@@ -1,0 +1,95 @@
+[
+  {
+    "id": "basic_dinner_party",
+    "description": "Simple dinner party with clear guest count",
+    "input": "I'm hosting a dinner party for 8 adults this Saturday",
+    "expected": {
+      "adult_count": 8,
+      "event_type": "dinner-party"
+    }
+  },
+  {
+    "id": "mixed_guests_with_dietary",
+    "description": "Mixed adults/children and a dietary restriction",
+    "input": "Planning a birthday dinner for 6 adults and 3 kids, one adult is vegan",
+    "expected": {
+      "adult_count": 6,
+      "child_count": 3,
+      "dietary_restrictions": [{"type": "vegan", "count": 1}]
+    }
+  },
+  {
+    "id": "cuisine_preference",
+    "description": "User specifies cuisine",
+    "input": "I want to do an Italian themed dinner for 10 people",
+    "expected": {
+      "cuisine_preferences": ["Italian"],
+      "adult_count": 10
+    }
+  },
+  {
+    "id": "multiple_dietary",
+    "description": "Multiple dietary restrictions",
+    "input": "We have 12 guests: 2 are vegetarian, 1 is gluten-free, and 1 is lactose intolerant",
+    "expected": {
+      "adult_count": 12,
+      "dietary_restrictions": [
+        {"type": "vegetarian", "count": 2},
+        {"type": "gluten-free", "count": 1},
+        {"type": "lactose-intolerant", "count": 1}
+      ]
+    }
+  },
+  {
+    "id": "bbq_event",
+    "description": "BBQ event type",
+    "input": "Throwing a backyard BBQ for about 20 people on July 4th",
+    "expected": {
+      "event_type": "bbq",
+      "adult_count": 20
+    }
+  },
+  {
+    "id": "formal_dinner",
+    "description": "Formal dinner with budget",
+    "input": "I'm planning a formal dinner for 8, budget is around $400",
+    "expected": {
+      "adult_count": 8,
+      "formality_level": "formal",
+      "budget": 400
+    }
+  },
+  {
+    "id": "recipe_add_specific_dish",
+    "description": "User provides a specific dish for the menu",
+    "input": "I want to make pasta carbonara as the main",
+    "expected_recipe_updates": [
+      {"action": "add", "recipe_name": "pasta carbonara"}
+    ]
+  },
+  {
+    "id": "recipe_remove_dish",
+    "description": "User removes a dish from the menu",
+    "input": "Actually, let's take the salad off the menu",
+    "context_recipes": ["Pasta Carbonara", "Salad", "Tiramisu"],
+    "expected_recipe_updates": [
+      {"action": "remove", "recipe_name": "salad"}
+    ]
+  },
+  {
+    "id": "meal_plan_confirmation",
+    "description": "User confirms the full menu",
+    "input": "Yes, that menu looks perfect! Let's go with it.",
+    "expected": {
+      "meal_plan_confirmed": true
+    }
+  },
+  {
+    "id": "output_format_in_chat",
+    "description": "User selects in-chat list output",
+    "input": "Just show me the list here in the chat",
+    "expected": {
+      "output_formats": ["in_chat"]
+    }
+  }
+]

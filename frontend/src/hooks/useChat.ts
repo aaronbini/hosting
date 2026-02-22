@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { EventData, Message } from '../types'
 
 type WebSocketMessage =
@@ -42,6 +42,8 @@ export const useChat = (sessionId: string): UseChatReturn => {
   const [isComplete, setIsComplete] = useState(false)
   const [ws, setWs] = useState<WebSocket | null>(null)
   const [isAwaitingReview, setIsAwaitingReview] = useState(false)
+  const isStreamingRef = useRef(false)
+  const pendingEventDataRef = useRef<EventData | null>(null)
 
   const formatShoppingListForChat = (shoppingList: any): string | null => {
     if (!shoppingList?.grouped || typeof shoppingList.grouped !== 'object') return null
@@ -85,20 +87,43 @@ export const useChat = (sessionId: string): UseChatReturn => {
         const data = JSON.parse(event.data) as WebSocketMessage
 
         if (data.type === 'stream_start') {
+          // Store event data but don't apply it yet - wait for first chunk
+          // This prevents upload panel from appearing before the message starts
+          pendingEventDataRef.current = data.data.event_data
           setCompletionScore(data.data.completion_score)
           setIsComplete(data.data.is_complete)
-          setEventData(data.data.event_data)
-          setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: new Date() }])
+          isStreamingRef.current = true
         } else if (data.type === 'stream_chunk') {
+          // Apply pending event data on first chunk
+          if (pendingEventDataRef.current) {
+            setEventData(pendingEventDataRef.current)
+            pendingEventDataRef.current = null
+          }
+
           setMessages(prev => {
             const updated = [...prev]
-            updated[updated.length - 1] = {
-              ...updated[updated.length - 1],
-              content: updated[updated.length - 1].content + data.data.text
+            const lastMsg = updated[updated.length - 1]
+
+            // If we're streaming and last message is from assistant, append to it
+            // Otherwise, create a new assistant message (first chunk)
+            if (isStreamingRef.current && lastMsg?.role === 'assistant') {
+              updated[updated.length - 1] = {
+                ...lastMsg,
+                content: lastMsg.content + data.data.text
+              }
+            } else {
+              // First chunk - create new message
+              updated.push({ role: 'assistant', content: data.data.text, timestamp: new Date() })
             }
             return updated
           })
         } else if (data.type === 'stream_end') {
+          // Apply pending event data if we never got chunks (edge case)
+          if (pendingEventDataRef.current) {
+            setEventData(pendingEventDataRef.current)
+            pendingEventDataRef.current = null
+          }
+          isStreamingRef.current = false
           setIsLoading(false)
         } else if (data.type === 'error') {
           setError(data.data.error)

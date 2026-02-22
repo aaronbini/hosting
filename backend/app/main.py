@@ -10,7 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from app.models.chat import ChatRequest, ChatResponse, MessageRole
-from app.models.event import ExtractionResult, OutputFormat, RecipeSource, RecipeSourceType
+from app.models.event import (
+    ExtractionResult,
+    OutputFormat,
+    PreparationMethod,
+    RecipeSourceType,
+    RecipeStatus,
+    RecipeType,
+)
 from app.services.ai_service import GeminiService
 from app.services.session_manager import SessionData, session_manager
 
@@ -65,24 +72,12 @@ GOOGLE_TASKS_SCOPE = "https://www.googleapis.com/auth/tasks"
 _OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
 _OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
 _OAUTH_REDIRECT_URI = os.getenv(
-    "GOOGLE_OAUTH_REDIRECT_URI", "http://localhost:8001/api/auth/google/callback"
+    "GOOGLE_OAUTH_REDIRECT_URI", "http://localhost:8000/api/auth/google/callback"
 )
 
 # ============================================================================
 # Shared helpers
 # ============================================================================
-
-
-def _find_or_create_recipe_source(event_data, dish_name: str) -> RecipeSource:
-    """Return the RecipeSource for dish_name, creating and appending one if not found."""
-    rs = next(
-        (rs for rs in event_data.recipe_sources if rs.dish_name.lower() == dish_name.lower()),
-        None,
-    )
-    if rs is None:
-        rs = RecipeSource(dish_name=dish_name)
-        event_data.recipe_sources.append(rs)
-    return rs
 
 
 def _build_oauth_flow():
@@ -114,7 +109,7 @@ def apply_extraction(session: SessionData, extraction: ExtractionResult) -> None
 
     Handles:
     - Standard field updates
-    - Meal plan delta merging (additions/removals)
+    - Recipe updates (add/remove/update recipes in meal plan)
     - Answered question tracking
     - Completion recomputation
     - Stage transitions
@@ -126,103 +121,68 @@ def apply_extraction(session: SessionData, extraction: ExtractionResult) -> None
     event_data.last_generated_recipes = None
 
     # 1. Apply standard extracted fields (exclude special fields)
-    exclude_fields = {
-        "answered_questions",
-        "meal_plan_additions",
-        "meal_plan_removals",
-        "meal_plan_confirmed",
-        "recipe_promise_additions",
-        "recipe_promise_resolutions",
-        "recipe_confirmations",
-        "recipes_confirmed",
-        "pending_upload_dish",
-        "output_formats",
-    }
+    exclude_fields = {"answered_questions", "recipe_updates", "meal_plan_confirmed", "output_formats"}
     extracted_data = extraction.model_dump(exclude_none=True, exclude=exclude_fields)
     if extracted_data:
         session.update_event_data(extracted_data)
 
-    # 2. Meal plan delta merge
-    if extraction.meal_plan_additions:
-        existing_lower = [d.lower() for d in event_data.meal_plan]
-        for dish in extraction.meal_plan_additions:
-            if dish.lower() not in existing_lower:
-                event_data.meal_plan.append(dish)
-                existing_lower.append(dish.lower())
+    # 2. Apply recipe updates to meal plan
+    if extraction.recipe_updates:
+        from app.models.event import Recipe, RecipeStatus
 
-    if extraction.meal_plan_removals:
-        removals_lower = [r.lower() for r in extraction.meal_plan_removals]
-        event_data.meal_plan = [d for d in event_data.meal_plan if d.lower() not in removals_lower]
+        for update in extraction.recipe_updates:
+            if update.action == "add":
+                # Add new recipe if not already present
+                if not event_data.meal_plan.find_recipe(update.recipe_name):
+                    event_data.meal_plan.add_recipe(
+                        Recipe(
+                            name=update.recipe_name,
+                            status=update.status or RecipeStatus.NAMED,
+                            awaiting_user_input=update.awaiting_user_input or False,
+                        )
+                    )
 
-    # 3. Recipe promises — track dishes user claims to have their own recipe for
-    if extraction.recipe_promise_additions:
-        existing_lower = [p.lower() for p in event_data.recipe_promises]
-        for dish in extraction.recipe_promise_additions:
-            if dish.lower() not in existing_lower:
-                event_data.recipe_promises.append(dish)
-                existing_lower.append(dish.lower())
+            elif update.action == "remove":
+                event_data.meal_plan.remove_recipe(update.recipe_name)
 
-    if extraction.recipe_promise_resolutions:
-        res_lower = {r.lower() for r in extraction.recipe_promise_resolutions}
-        event_data.recipe_promises = [
-            p for p in event_data.recipe_promises if p.lower() not in res_lower
-        ]
+            elif update.action == "update":
+                recipe = event_data.meal_plan.find_recipe(update.recipe_name)
+                if recipe:
+                    # Extract non-None fields from update, excluding meta fields
+                    updates = update.model_dump(exclude_none=True, exclude={"recipe_name", "action"})
+                    # Handle rename: new_name → name
+                    if "new_name" in updates:
+                        updates["name"] = updates.pop("new_name")
 
-    # 4. Mark answered questions
+                    # Apply updates using model_copy
+                    idx = event_data.meal_plan.recipes.index(recipe)
+                    event_data.meal_plan.recipes[idx] = recipe.model_copy(update=updates)
+
+    # 3. Mark answered questions
     for question_id in extraction.answered_questions:
         if question_id in event_data.answered_questions:
             event_data.answered_questions[question_id] = True
 
-    # 5. Handle meal_plan_confirmed — only mark meal_plan answered when explicitly confirmed
-    if extraction.meal_plan_confirmed and len(event_data.meal_plan) > 0:
-        event_data.answered_questions["meal_plan"] = True
+    # 4. Handle meal_plan_confirmed
+    if extraction.meal_plan_confirmed:
+        event_data.meal_plan.confirmed = True
+        if len(event_data.meal_plan.recipes) > 0:
+            event_data.answered_questions["meal_plan"] = True
 
-    # 6. Pending upload dish — persist while the recipe promise is still unresolved.
-    # If the extraction sets a new value, use it. If it's null but the current dish
-    # still has an unresolved promise, keep showing the panel.
-    if extraction.pending_upload_dish is not None:
-        event_data.pending_upload_dish = extraction.pending_upload_dish
-    elif event_data.pending_upload_dish:
-        dish_lower = event_data.pending_upload_dish.lower()
-        still_pending = any(p.lower() == dish_lower for p in event_data.recipe_promises)
-        if not still_pending:
-            event_data.pending_upload_dish = None
-        # else: keep it set so the panel remains visible
-
-    # 6. Recipe confirmations — update source tracking per dish
-    if extraction.recipe_confirmations:
-        for rc in extraction.recipe_confirmations:
-            for rs in event_data.recipe_sources:
-                if rs.dish_name.lower() == rc.dish_name.lower():
-                    if rc.confirmed is not None:
-                        rs.confirmed = rc.confirmed
-                    if rc.source_type:
-                        rs.source_type = RecipeSourceType(rc.source_type)
-                    if rc.description:
-                        rs.description = rc.description
-
-    # 7. Output format selection
+    # 5. Output format selection
     if extraction.output_formats:
         event_data.output_formats = [
-            OutputFormat(f)
-            for f in extraction.output_formats
-            if f in [e.value for e in OutputFormat]
+            OutputFormat(f) for f in extraction.output_formats if f in [e.value for e in OutputFormat]
         ]
 
-    # 7. Recompute completion score
+    # 6. Recompute completion score
     event_data.compute_derived_fields()
 
-    # 8. Stage transitions
+    # 7. Stage transitions
     if event_data.conversation_stage == "gathering" and event_data.is_complete:
         event_data.conversation_stage = "recipe_confirmation"
-        # Add recipe_sources for any dish not already tracked (preserves uploads done during gathering)
-        existing_dishes = {rs.dish_name.lower() for rs in event_data.recipe_sources}
-        for dish in event_data.meal_plan:
-            if dish.lower() not in existing_dishes:
-                event_data.recipe_sources.append(RecipeSource(dish_name=dish))
-
     elif event_data.conversation_stage == "recipe_confirmation":
-        if extraction.recipes_confirmed or all(rs.confirmed for rs in event_data.recipe_sources):
+        if event_data.meal_plan.is_complete:
             event_data.conversation_stage = "selecting_output"
 
     elif event_data.conversation_stage == "selecting_output":
@@ -288,11 +248,13 @@ async def chat(request: ChatRequest) -> ChatResponse:
         ),
         None,
     )
-    extraction = ai_service.extract_event_data(request.message, session.event_data, last_assistant)
+    extraction = await ai_service.extract_event_data(
+        request.message, session.event_data, last_assistant
+    )
     apply_extraction(session, extraction)
 
     # Generate AI response
-    ai_response = ai_service.generate_response(
+    ai_response = await ai_service.generate_response(
         request.message, session.event_data, session.conversation_history
     )
 
@@ -379,6 +341,12 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
             try:
                 # Add user message
                 session.add_message(MessageRole.USER, msg_data)
+                logger.info(
+                    "📨 USER MESSAGE (session=%s, stage=%s): %s",
+                    session_id[:8],
+                    session.event_data.conversation_stage,
+                    msg_data[:100],
+                )
 
                 last_assistant = next(
                     (
@@ -388,94 +356,99 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     ),
                     None,
                 )
-                extraction = ai_service.extract_event_data(
+                extraction = await ai_service.extract_event_data(
                     msg_data, session.event_data, last_assistant
+                )
+                logger.info(
+                    "🔄 APPLYING EXTRACTION (stage=%s): %d recipe_updates, meal_plan_confirmed=%s",
+                    session.event_data.conversation_stage,
+                    len(extraction.recipe_updates) if extraction.recipe_updates else 0,
+                    extraction.meal_plan_confirmed,
                 )
                 apply_extraction(session, extraction)
 
-                # Auto-extract any recipe URL or description provided in this message.
-                # Must run before AI response so the AI can surface failures/successes.
-                for rc in extraction.recipe_confirmations or []:
-                    if rc.url:
-                        try:
-                            ingredients = await ai_service.extract_recipe_from_url(rc.url)
-                            if not ingredients:
-                                raise ValueError("No ingredient list found on that page")
-                            rs_to_update = _find_or_create_recipe_source(
-                                session.event_data, rc.dish_name
-                            )
-                            rs_to_update.source_type = RecipeSourceType.USER_URL
-                            rs_to_update.url = rc.url
-                            rs_to_update.extracted_ingredients = [i.model_dump() for i in ingredients]
-                            rs_to_update.confirmed = True
-                            # Resolve the promise if it exists
-                            session.event_data.recipe_promises = [
-                                p
-                                for p in session.event_data.recipe_promises
-                                if p.lower() != rc.dish_name.lower()
-                            ]
-                            session.event_data.last_url_extraction_result = {
-                                "dish": rc.dish_name,
-                                "success": True,
-                                "ingredient_count": len(ingredients),
-                            }
-                        except Exception as url_err:
-                            logger.warning(
-                                "URL extraction failed for '%s': %s", rc.dish_name, url_err
-                            )
-                            session.event_data.last_url_extraction_result = {
-                                "dish": rc.dish_name,
-                                "success": False,
-                                "error": str(url_err),
-                            }
-                    elif rc.description and rc.source_type == "user_description":
-                        try:
-                            ingredients = await ai_service.extract_recipe_from_description(
-                                rc.description
-                            )
-                            rs_to_update = _find_or_create_recipe_source(
-                                session.event_data, rc.dish_name
-                            )
-                            rs_to_update.source_type = RecipeSourceType.USER_DESCRIPTION
-                            rs_to_update.description = rc.description
-                            rs_to_update.extracted_ingredients = [i.model_dump() for i in ingredients]
-                            rs_to_update.confirmed = True
-                            session.event_data.recipe_promises = [
-                                p
-                                for p in session.event_data.recipe_promises
-                                if p.lower() != rc.dish_name.lower()
-                            ]
-                        except Exception as desc_err:
-                            logger.warning(
-                                "Description extraction failed for '%s': %s",
-                                rc.dish_name,
-                                desc_err,
-                            )
+                # Handle URL/description extraction if provided in recipe_updates
+                if extraction.recipe_updates:
+                    for update in extraction.recipe_updates:
+                        if update.url:
+                            try:
+                                logger.info(
+                                    "Extracting recipe from URL for '%s': %s", update.recipe_name, update.url
+                                )
+                                ingredients = await ai_service.extract_recipe_from_url(update.url)
+                                if not ingredients:
+                                    raise ValueError("No ingredient list found on that page")
+                                # Update the recipe
+                                recipe = session.event_data.meal_plan.find_recipe(update.recipe_name)
+                                if recipe:
+                                    recipe.ingredients = [i.model_dump() for i in ingredients]
+                                    recipe.source_type = RecipeSourceType.USER_URL
+                                    recipe.url = update.url
+                                    recipe.status = RecipeStatus.COMPLETE
+                                    recipe.awaiting_user_input = False
+                                session.event_data.last_url_extraction_result = {
+                                    "dish": update.recipe_name,
+                                    "success": True,
+                                    "ingredient_count": len(ingredients),
+                                }
+                            except Exception as url_err:
+                                logger.warning(
+                                    "URL extraction failed for '%s': %s", update.recipe_name, url_err
+                                )
+                                session.event_data.last_url_extraction_result = {
+                                    "dish": update.recipe_name,
+                                    "success": False,
+                                    "error": str(url_err),
+                                }
+                        elif update.description:
+                            try:
+                                logger.info(
+                                    "Extracting recipe from description for '%s': %s", update.recipe_name, update.description[:100]
+                                )
+                                ingredients = await ai_service.extract_recipe_from_description(
+                                    update.description
+                                )
+                                recipe = session.event_data.meal_plan.find_recipe(update.recipe_name)
+                                if recipe:
+                                    recipe.ingredients = [i.model_dump() for i in ingredients]
+                                    recipe.source_type = RecipeSourceType.USER_DESCRIPTION
+                                    recipe.description = update.description
+                                    recipe.status = RecipeStatus.COMPLETE
+                                    recipe.awaiting_user_input = False
+                            except Exception as desc_err:
+                                logger.warning(
+                                    "Description extraction failed for '%s': %s",
+                                    update.recipe_name,
+                                    desc_err,
+                                )
 
                 # During recipe_confirmation, auto-generate default ingredient lists for
-                # any AI_DEFAULT dish that hasn't been generated yet.
+                # any AI_DEFAULT recipes that haven't been generated yet.
+                # EXCLUDE beverages and store-bought items - they don't need recipe extraction.
                 if session.event_data.conversation_stage == "recipe_confirmation":
-                    dishes_needing_recipes = [
-                        rs
-                        for rs in session.event_data.recipe_sources
-                        if rs.source_type == RecipeSourceType.AI_DEFAULT
-                        and rs.extracted_ingredients is None
+                    recipes_needing_ingredients = [
+                        r
+                        for r in session.event_data.meal_plan.recipes
+                        if r.source_type == RecipeSourceType.AI_DEFAULT
+                        and r.needs_ingredients()
+                        and r.status != RecipeStatus.PLACEHOLDER  # Skip placeholders — model will invent wrong dish
+                        and not (r.recipe_type == RecipeType.DRINK and r.preparation_method == PreparationMethod.STORE_BOUGHT)
+                        and r.preparation_method != PreparationMethod.STORE_BOUGHT  # Also skip store-bought food
                     ]
-                    if dishes_needing_recipes:
-                        results = await asyncio.gather(
-                            *[
-                                ai_service.generate_default_recipe(rs.dish_name)
-                                for rs in dishes_needing_recipes
-                            ]
+                    if recipes_needing_ingredients:
+                        logger.info(
+                            "Auto-generating default ingredients for %d AI_DEFAULT recipes (batched)",
+                            len(recipes_needing_ingredients),
+                        )
+                        results = await ai_service.generate_default_recipes_batch(
+                            [r.name for r in recipes_needing_ingredients]
                         )
                         newly_generated = []
-                        for rs, ingredients in zip(dishes_needing_recipes, results):
-                            rs.extracted_ingredients = [i.model_dump() for i in ingredients]
+                        for recipe, ingredients in zip(recipes_needing_ingredients, results):
+                            recipe.ingredients = [i.model_dump() for i in ingredients]
+                            recipe.status = RecipeStatus.COMPLETE
                             newly_generated.append(
-                                {
-                                    "dish": rs.dish_name,
-                                    "ingredients": rs.extracted_ingredients,
-                                }
+                                {"dish": recipe.name, "ingredients": recipe.ingredients}
                             )
                         session.event_data.last_generated_recipes = newly_generated
 
@@ -486,7 +459,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     from app.services.tasks_service import TasksService
 
                     tasks_service = None
-                    if session.google_credentials and OutputFormat.GOOGLE_TASKS in session.event_data.output_formats:
+                    if _OAUTH_CLIENT_ID and _OAUTH_CLIENT_SECRET and OutputFormat.GOOGLE_TASKS in session.event_data.output_formats:
                         tasks_service = TasksService.from_token_dict(session.google_credentials)
 
                     session.agent_state = await run_agent(
@@ -513,14 +486,20 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                 # Stream AI response in chunks
                 full_response = []
-                for chunk in ai_service.generate_response_stream(
+                async for chunk in ai_service.generate_response_stream(
                     msg_data, session.event_data, session.conversation_history
                 ):
                     await websocket.send_json({"type": "stream_chunk", "data": {"text": chunk}})
                     full_response.append(chunk)
 
                 # Signal done and save complete message to history
-                session.add_message(MessageRole.ASSISTANT, "".join(full_response))
+                complete_response = "".join(full_response)
+                session.add_message(MessageRole.ASSISTANT, complete_response)
+                logger.info(
+                    "💬 ASSISTANT RESPONSE (session=%s): %s",
+                    session_id[:8],
+                    complete_response[:100] + "..." if len(complete_response) > 100 else complete_response,
+                )
                 await websocket.send_json({"type": "stream_end"})
 
             except Exception as e:
@@ -586,10 +565,15 @@ async def extract_recipe_from_url(session_id: str, body: dict):
         )
         return {"dish_name": dish_name, "ingredients": [], "success": False, "message": detail}
 
-    rs_to_update = _find_or_create_recipe_source(session.event_data, dish_name)
-    rs_to_update.source_type = RecipeSourceType.USER_URL
-    rs_to_update.url = url
-    rs_to_update.extracted_ingredients = [i.model_dump() for i in ingredients]
+    recipe = session.event_data.meal_plan.find_recipe(dish_name)
+    if not recipe:
+        raise HTTPException(status_code=404, detail=f"Recipe '{dish_name}' not found in meal plan")
+
+    recipe.source_type = RecipeSourceType.USER_URL
+    recipe.url = url
+    recipe.ingredients = [i.model_dump() for i in ingredients]
+    recipe.status = RecipeStatus.COMPLETE
+    recipe.awaiting_user_input = False
 
     return {
         "dish_name": dish_name,
@@ -626,19 +610,31 @@ async def upload_recipe(
         )
 
     content = await file.read()
-    ingredients = await ai_service.extract_recipe_from_file(content, file.content_type)
+    extracted_dish_name, ingredients = await ai_service.extract_recipe_from_file(
+        content, file.content_type
+    )
 
-    rs_to_update = _find_or_create_recipe_source(session.event_data, dish_name)
-    rs_to_update.source_type = RecipeSourceType.USER_UPLOAD
-    rs_to_update.extracted_ingredients = [i.model_dump() for i in ingredients]
-    rs_to_update.confirmed = True
+    recipe = session.event_data.meal_plan.find_recipe(dish_name)
+    if not recipe:
+        raise HTTPException(status_code=404, detail=f"Recipe '{dish_name}' not found in meal plan")
 
-    session.event_data.recipe_promises = [
-        p for p in session.event_data.recipe_promises if p.lower() != dish_name.lower()
-    ]
+    final_dish_name = dish_name
+
+    # If this is a placeholder and we extracted an actual dish name, rename it
+    if recipe.status == RecipeStatus.PLACEHOLDER and extracted_dish_name:
+        recipe.name = extracted_dish_name
+        final_dish_name = extracted_dish_name
+        logger.info(f"Replaced placeholder '{dish_name}' with extracted '{extracted_dish_name}'")
+
+    # Update recipe with ingredients and source info
+    recipe.ingredients = [i.model_dump() for i in ingredients]
+    recipe.source_type = RecipeSourceType.USER_UPLOAD
+    recipe.awaiting_user_input = False
+    # Set status to COMPLETE only if we got ingredients
+    recipe.status = RecipeStatus.COMPLETE if len(ingredients) > 0 else RecipeStatus.NAMED
 
     return {
-        "dish_name": dish_name,
+        "dish_name": final_dish_name,
         "ingredients": [i.model_dump() for i in ingredients],
     }
 
