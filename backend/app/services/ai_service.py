@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 from typing import Generator, Optional
@@ -37,6 +38,8 @@ CATEGORY_SERVING_HINTS: dict[str, str] = {
     DishCategory.BEVERAGE_ALCOHOLIC: "1 serving ≈ 12 fl oz beer, 5 fl oz wine, or 1.5 fl oz spirit",
     DishCategory.BEVERAGE_NONALCOHOLIC: "1 serving ≈ 10 fl oz",
 }
+
+_MAX_CONTENT_CHARS = 30_000
 
 INGREDIENT_UNIT_RULES = """
 - Use shopping-friendly units that match how items are actually sold:
@@ -156,16 +159,33 @@ class GeminiService:
 
                             IF conversation_stage == "recipe_confirmation":
 
-                              The menu is locked. Now confirm the recipe/preparation for each dish.
+                              The menu is locked. Now confirm the actual ingredients for each dish.
 
-                              For each dish in the meal plan, present ALL dishes at once in a numbered list with
-                              your assumed recipe approach. Example:
-                              "Let's confirm recipes for each dish:
-                              1. Ribs — I'll assume classic dry-rubbed smoked BBQ ribs with vinegar sauce
-                              2. Potato salad — classic mayo-based with eggs and celery
-                              3. Cornbread — traditional Southern-style"
+                              PRESENTING NEWLY GENERATED RECIPES:
+                              If "last_generated_recipes" appears in CURRENT EVENT DATA, the system just generated
+                              default ingredient lists for those dishes. You MUST present them to the user now.
+                              Format each dish like this (use a bullet list for ingredients):
 
-                              Ask the user to confirm or correct any dish. For dishes where the user has their own recipe:
+                              "Here's the recipe I'll use for each dish — let me know if anything looks off:
+
+                              **[Dish Name]**
+                              • ingredient 1
+                              • ingredient 2
+                              • …
+
+                              **[Next Dish]**
+                              • …
+
+                              Happy with these, or would you like to change any dish? You can also swap in your
+                              own recipe by pasting a URL, uploading a file, or describing the ingredients."
+
+                              ON SUBSEQUENT TURNS (no last_generated_recipes):
+                              The user is reviewing or correcting dishes. Handle their feedback:
+                              - If they confirm everything: acknowledge and move on.
+                              - If they want to change a dish: acknowledge the change and confirm the new approach.
+                              - If they want to provide their own recipe: guide them (URL, upload, description).
+
+                              For dishes where the user has their own recipe:
                               - They can paste a URL to an online recipe (ask them to paste the URL directly in chat)
                               - They can upload a file (PDF, photo of a recipe card) using the upload panel below the chat
                               - They can describe the key ingredients conversationally
@@ -208,7 +228,7 @@ class GeminiService:
                               All recipes are confirmed. Ask how they want their shopping list delivered:
 
                               1. **Google Sheet** — formula-driven spreadsheet, quantities auto-adjust
-                              2. **Google Keep** — checklist format, great for shopping on your phone
+                              2. **Google Tasks** — checklist format, great for shopping on your phone
                               3. **In-chat list** — formatted list right here in the conversation
                               4. **Any combination** of the above
 
@@ -238,58 +258,68 @@ class GeminiService:
                             3. Describe the key ingredients in the chat
                             Do NOT proceed as if the recipe was collected. The promise is still open."""
 
-    def generate_response(
-        self, user_message: str, event_data: EventPlanningData, conversation_history: list
-    ) -> str:
-        """
-        Generate conversational AI response using Gemini.
-        """
+    # -----------------------------------------------------------------------
+    # Private helpers
+    # -----------------------------------------------------------------------
+
+    def _build_chat_context(
+        self,
+        user_message: str,
+        event_data: EventPlanningData,
+        conversation_history: list,
+    ) -> tuple[str, list]:
+        """Return (system_prompt_with_context, contents_list) for a chat call."""
         event_json = json.dumps(event_data.model_dump(exclude_none=True), indent=2)
         system_with_context = self.system_prompt.format(
             event_data_json=event_json, conversation_stage=event_data.conversation_stage
         )
-
-        # Build conversation history in new SDK format
-        contents = []
-        for msg in conversation_history[-10:]:
-            contents.append(
-                types.Content(
-                    role="user" if msg.role == "user" else "model",
-                    parts=[types.Part(text=msg.content)],
-                )
+        contents = [
+            types.Content(
+                role="user" if msg.role == "user" else "model",
+                parts=[types.Part(text=msg.content)],
             )
+            for msg in conversation_history[-10:]
+        ]
         contents.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
+        return system_with_context, contents
 
+    async def _async_json_call(self, contents, schema, *, temperature: float | None = None):
+        """Call Gemini async in JSON mode and return the parsed response object."""
+        config_kwargs: dict = {"response_mime_type": "application/json", "response_schema": schema}
+        if temperature is not None:
+            config_kwargs["temperature"] = temperature
+        response = await self.client.aio.models.generate_content(
+            model=self.model_name,
+            contents=contents,
+            config=types.GenerateContentConfig(**config_kwargs),
+        )
+        return response.parsed
+
+    # -----------------------------------------------------------------------
+    # Chat response methods
+    # -----------------------------------------------------------------------
+
+    def generate_response(
+        self, user_message: str, event_data: EventPlanningData, conversation_history: list
+    ) -> str:
+        """Generate conversational AI response using Gemini."""
+        system_with_context, contents = self._build_chat_context(
+            user_message, event_data, conversation_history
+        )
         response = self.client.models.generate_content(
             model=self.model_name,
             contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_with_context,
-            ),
+            config=types.GenerateContentConfig(system_instruction=system_with_context),
         )
-
         return response.text
 
     def generate_response_stream(
         self, user_message: str, event_data: EventPlanningData, conversation_history: list
     ) -> Generator[str, None, None]:
-        """Yields text chunks as Gemini streams the response."""
-        event_json = json.dumps(event_data.model_dump(exclude_none=True), indent=2)
-        system_with_context = self.system_prompt.format(
-            event_data_json=event_json, conversation_stage=event_data.conversation_stage
+        """Yield text chunks as Gemini streams the response."""
+        system_with_context, contents = self._build_chat_context(
+            user_message, event_data, conversation_history
         )
-
-        # Build conversation history in new SDK format
-        contents = []
-        for msg in conversation_history[-10:]:
-            contents.append(
-                types.Content(
-                    role="user" if msg.role == "user" else "model",
-                    parts=[types.Part(text=msg.content)],
-                )
-            )
-        contents.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
-
         for chunk in self.client.models.generate_content_stream(
             model=self.model_name,
             contents=contents,
@@ -329,7 +359,7 @@ class GeminiService:
                     General rules:
                     - Only extract fields that are explicitly mentioned or clearly confirmed. Leave everything else null.
                     - Do not re-extract fields already in "Current known data" unless the user is correcting them.
-                    - For event_date, convert to ISO format YYYY-MM-DD. Today is {__import__("datetime").date.today().isoformat()}.
+                    - For event_date, convert to ISO format YYYY-MM-DD. Today is {datetime.date.today().isoformat()}.
                     - For answered_questions, include the ID of every question the message addresses.
 
                     Valid answered_questions IDs: event_type, event_date, guest_count, guest_breakdown,
@@ -366,6 +396,12 @@ class GeminiService:
                       with dish_name, confirmed (true/false), and optionally source_type, description, url.
                     - If the user provides a URL for a dish's recipe, set url to that URL and
                       source_type to "user_url". The system will auto-fetch and extract it.
+                    - If the user describes the recipe or key ingredients (e.g., "use lemon juice and
+                      olive oil", "add garlic and herbs", "make it with butter instead of oil"), set
+                      source_type to "user_description" and put the description in the description field.
+                      Include ALL ingredient corrections/changes the user described.
+                    - If the user simply confirms the AI-generated recipe is fine (e.g., "looks good",
+                      "that's perfect", "yes"), set confirmed to true but leave source_type null.
                     - Set recipes_confirmed to true ONLY if the user confirms ALL recipes are good.
                     - Set pending_upload_dish to the dish name if the user indicates they have a FILE
                       (PDF, photo, screenshot, recipe card) to upload for a specific dish. Set to null
@@ -375,7 +411,7 @@ class GeminiService:
 
                     IF stage == "selecting_output":
                     - Focus on output_formats: extract the user's chosen format(s) as a list.
-                      Valid values: "google_sheet", "google_keep", "in_chat".
+                      Valid values: "google_sheet", "google_tasks", "in_chat".
                     - Ignore event-level and recipe fields.
 
                     Current known data:
@@ -400,20 +436,11 @@ class GeminiService:
     # -----------------------------------------------------------------------
 
     async def extract_recipe_from_url(self, url: str) -> list[RecipeIngredient]:
-        """
-        Fetch a recipe URL and extract a structured ingredient list.
-
-        Uses httpx to fetch the page, then Gemini to parse the content.
-        """
+        """Fetch a recipe URL and extract a structured ingredient list."""
         async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
             resp = await client.get(url)
             resp.raise_for_status()
-            page_content = resp.text
-
-        # Truncate to avoid exceeding token limits on very large pages
-        max_chars = 30000
-        if len(page_content) > max_chars:
-            page_content = page_content[:max_chars]
+            page_content = resp.text[:_MAX_CONTENT_CHARS]
 
         prompt = f"""Extract the ingredient list from this recipe page.
 
@@ -427,28 +454,15 @@ class GeminiService:
                     Page content:
                     {page_content}
                     """
-        response = await self.client.aio.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=_ExtractedRecipe,
-            ),
-        )
-        return response.parsed.ingredients
+        result = await self._async_json_call(prompt, _ExtractedRecipe)
+        return result.ingredients
 
     async def extract_recipe_from_file(
         self, content: bytes, mime_type: str
     ) -> list[RecipeIngredient]:
-        """
-        Extract ingredients from an uploaded file.
-
-        For images (jpg/png): uses Gemini vision.
-        For text/PDF: extracts text content and passes to Gemini.
-        """
+        """Extract ingredients from an uploaded file (image via vision, text/PDF via text)."""
         if mime_type.startswith("image/"):
-            # Use Gemini vision for images (recipe cards, cookbook photos)
-            parts = [
+            contents = [
                 types.Part.from_bytes(data=content, mime_type=mime_type),
                 types.Part(
                     text=(
@@ -462,22 +476,9 @@ class GeminiService:
                     )
                 ),
             ]
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=parts,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=_ExtractedRecipe,
-                ),
-            )
         else:
-            # Text-based files (txt, pdf text extraction)
-            text_content = content.decode("utf-8", errors="replace")
-            max_chars = 30000
-            if len(text_content) > max_chars:
-                text_content = text_content[:max_chars]
-
-            prompt = f"""Extract the ingredient list from this recipe text.
+            text_content = content.decode("utf-8", errors="replace")[:_MAX_CONTENT_CHARS]
+            contents = f"""Extract the ingredient list from this recipe text.
 
                         Rules:
                         - Extract ONLY ingredients, not instructions.
@@ -489,15 +490,28 @@ class GeminiService:
                         Recipe text:
                         {text_content}
                         """
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=_ExtractedRecipe,
-                ),
-            )
-        return response.parsed.ingredients
+        result = await self._async_json_call(contents, _ExtractedRecipe)
+        return result.ingredients
+
+    async def generate_default_recipe(self, dish_name: str) -> list[RecipeIngredient]:
+        """
+        Generate a standard ingredient list for a dish using AI defaults.
+
+        Produces a base-quantity recipe (for ~4 adult servings). The agent
+        scales these to the actual guest count later via get_dish_ingredients.
+        """
+        prompt = f"""Provide a complete ingredient list for a classic version of: {dish_name}
+
+                    Rules:
+                    - Use a standard recipe for 4 adult servings.
+                    - List all ingredients needed to make this dish.
+                    - Standardise names ("olive oil" not "EVOO", "spring onions" not "scallions").
+                    {INGREDIENT_UNIT_RULES}
+                    - Assign each ingredient the most appropriate grocery_category.
+                    - Do NOT include water.
+                    """
+        result = await self._async_json_call(prompt, _ExtractedRecipe, temperature=0.2)
+        return result.ingredients
 
     async def extract_recipe_from_description(self, description: str) -> list[RecipeIngredient]:
         """
@@ -520,15 +534,8 @@ class GeminiService:
                     {INGREDIENT_UNIT_RULES}
                     - Assign each ingredient the most appropriate grocery_category.
                     """
-        response = await self.client.aio.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=_ExtractedRecipe,
-            ),
-        )
-        return response.parsed.ingredients
+        result = await self._async_json_call(prompt, _ExtractedRecipe)
+        return result.ingredients
 
     # -----------------------------------------------------------------------
     # Recipe / quantity methods (async — called from agent steps)
@@ -557,16 +564,9 @@ class GeminiService:
                       and a starch, pick whichever dominates).
                     - Beverages always get a beverage category; appetisers get passed_appetizer.
                     """
-        response = await self.client.aio.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=_DishCategoryMapping,
-                temperature=0.0,
-            ),
+        mapping: _DishCategoryMapping = await self._async_json_call(
+            prompt, _DishCategoryMapping, temperature=0.0
         )
-        mapping: _DishCategoryMapping = response.parsed
         return {item.dish_name: item.category for item in mapping.items}
 
     async def get_dish_ingredients(
@@ -616,16 +616,9 @@ class GeminiService:
                     - If user-provided ingredients are included above, use those as the base
                       recipe and scale them. Do NOT substitute different ingredients.
                     """
-        response = await self.client.aio.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=DishIngredients,
-                temperature=0.0,
-            ),
+        result: DishIngredients = await self._async_json_call(
+            prompt, DishIngredients, temperature=0.0
         )
-        result: DishIngredients = response.parsed
         # Ensure the serving_spec is attached (Gemini won't include it)
         result.serving_spec = spec
         return result
@@ -661,16 +654,9 @@ class GeminiService:
                     Ingredient lists by dish:
                     {dishes_json}
                     """
-        response = await self.client.aio.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=_AggregatedItems,
-                temperature=0.0,
-            ),
+        result: _AggregatedItems = await self._async_json_call(
+            prompt, _AggregatedItems, temperature=0.0
         )
-        result: _AggregatedItems = response.parsed
         # Construct ShoppingList — runner fills in guest counts from AgentState
         return ShoppingList(
             meal_plan=[d.dish_name for d in all_dish_ingredients],
@@ -706,16 +692,9 @@ class GeminiService:
                     - Return the full updated shopping list (all items, not just changed ones).
                     - Maintain the same structure as the input.
                     """
-        response = await self.client.aio.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=_AggregatedItems,
-                temperature=0.0,
-            ),
+        result: _AggregatedItems = await self._async_json_call(
+            prompt, _AggregatedItems, temperature=0.0
         )
-        result: _AggregatedItems = response.parsed
         return ShoppingList(
             meal_plan=shopping_list.meal_plan,
             adult_count=shopping_list.adult_count,

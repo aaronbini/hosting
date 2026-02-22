@@ -27,8 +27,8 @@ from app.agent.steps import (
     aggregate_ingredients,
     apply_corrections,
     calculate_quantities,
-    create_google_keep,
     create_google_sheet,
+    create_google_tasks,
     format_chat_output,
     get_all_dish_ingredients,
 )
@@ -57,6 +57,7 @@ async def run_agent(
     output_formats: list[OutputFormat],
     ai_service: GeminiService,
     existing_state: Optional[AgentState] = None,
+    tasks_service=None,
 ) -> AgentState:
     """
     Run the full agent pipeline for a session.
@@ -222,8 +223,8 @@ async def run_agent(
 
         if OutputFormat.GOOGLE_SHEET in output_formats:
             delivery_tasks.append(create_google_sheet(state))
-        if OutputFormat.GOOGLE_KEEP in output_formats:
-            delivery_tasks.append(create_google_keep(state))
+        if OutputFormat.GOOGLE_TASKS in output_formats:
+            delivery_tasks.append(create_google_tasks(state, tasks_service))
 
         results = await asyncio.gather(*delivery_tasks, return_exceptions=True)
 
@@ -245,7 +246,7 @@ async def run_agent(
                 "stage": AgentStage.COMPLETE,
                 "formatted_output": state.formatted_chat_output,
                 "google_sheet_url": state.google_sheet_url,
-                "google_keep_url": state.google_keep_url,
+                "google_tasks_url": state.google_tasks_url,
             },
         )
 

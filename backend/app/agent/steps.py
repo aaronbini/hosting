@@ -213,19 +213,26 @@ async def create_google_sheet(state: AgentState) -> AgentState:
 
 
 # ---------------------------------------------------------------------------
-# Step 5b — Create Google Keep list (stub)
+# Step 5b — Create Google Tasks list
 # ---------------------------------------------------------------------------
 
 
-async def create_google_keep(state: AgentState) -> AgentState:
+async def create_google_tasks(state: AgentState, tasks_service=None) -> AgentState:
     """
-    Stub: create a Google Keep checklist from the shopping list and return its URL.
-    Pending Google Keep API auth setup.
+    Create a Google Tasks checklist from the shopping list and return its URL.
+    Requires a TasksService instance (built from session OAuth credentials).
+    If tasks_service is None (no credentials yet), skips gracefully.
     """
-    # TODO: implement once Google API credentials are configured
-    logger.info("[STEP 5b] Starting create_google_keep")
-    state.google_keep_url = None
-    logger.info("[STEP 5b] create_google_keep: stub — not yet implemented")
+    logger.info("[STEP 5b] Starting create_google_tasks")
+    if not tasks_service:
+        logger.warning("[STEP 5b] No TasksService provided — skipping (no Google credentials)")
+        state.google_tasks_url = None
+        return state
+
+    title = f"Dinner Party Shopping - {state.event_data.event_date or 'Today'}"
+    list_id = await tasks_service.create_shopping_list(state.shopping_list, title)
+    state.google_tasks_url = f"https://tasks.google.com/tasks/lists/{list_id}"
+    logger.info("[STEP 5b] create_google_tasks: task list created — %s", state.google_tasks_url)
     return state
 
 

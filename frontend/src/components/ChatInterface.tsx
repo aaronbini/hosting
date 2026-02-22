@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useChat } from '../hooks/useChat'
 import ChatMessages from './ChatMessages'
 import ChatInput from './ChatInput'
@@ -27,6 +27,28 @@ export default function ChatInterface({ sessionId }: Props) {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const connectionAttempted = useRef(false)
+  const [isGoogleConnected, setIsGoogleConnected] = useState(false)
+
+  const needsGoogleAuth =
+    eventData?.conversation_stage === 'selecting_output' &&
+    eventData.output_formats?.includes('google_tasks') &&
+    !isGoogleConnected
+
+  const handleConnectGoogle = useCallback(async () => {
+    const res = await fetch(`/api/auth/google/start?session_id=${sessionId}`)
+    if (!res.ok) return
+    const { auth_url } = await res.json()
+    const popup = window.open(auth_url, 'google_oauth', 'width=500,height=650')
+
+    const onMessage = (event: MessageEvent) => {
+      if (event.data === 'google_auth_complete') {
+        setIsGoogleConnected(true)
+        window.removeEventListener('message', onMessage)
+        popup?.close()
+      }
+    }
+    window.addEventListener('message', onMessage)
+  }, [sessionId])
 
   useEffect(() => {
     if (connectionAttempted.current) return
@@ -72,8 +94,8 @@ export default function ChatInterface({ sessionId }: Props) {
           messagesEndRef={messagesEndRef}
         />
 
-        {/* Recipe upload — visible during recipe_confirmation or when a file upload is pending */}
-        {eventData && (eventData.conversation_stage === 'recipe_confirmation' || !!eventData.pending_upload_dish) && (
+        {/* Recipe upload — visible during recipe_confirmation, when promises are pending, or when a file upload is pending */}
+        {eventData && (eventData.conversation_stage === 'recipe_confirmation' || (eventData.recipe_promises && eventData.recipe_promises.length > 0) || !!eventData.pending_upload_dish) && (
           <RecipeUploadPanel
             sessionId={sessionId}
             mealPlan={eventData.meal_plan}
@@ -82,6 +104,28 @@ export default function ChatInterface({ sessionId }: Props) {
               handleSendMessage(`I uploaded a recipe file for ${dishName}.`)
             }
           />
+        )}
+
+        {/* Connect Google — visible during output selection when Google Tasks is chosen */}
+        {needsGoogleAuth && (
+          <div className="border-t border-slate-200 bg-blue-50 px-4 py-3 flex items-center gap-3">
+            <p className="text-sm text-slate-600 flex-1">
+              Google Tasks selected — connect your Google account to deliver the list.
+            </p>
+            <button
+              onClick={handleConnectGoogle}
+              className="px-5 py-2 text-sm font-medium rounded bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+            >
+              Connect Google
+            </button>
+          </div>
+        )}
+        {eventData?.conversation_stage === 'selecting_output' &&
+          eventData.output_formats?.includes('google_tasks') &&
+          isGoogleConnected && (
+          <div className="border-t border-slate-200 bg-green-50 px-4 py-3">
+            <p className="text-sm text-green-700">✓ Google account connected</p>
+          </div>
         )}
 
         {/* Approve button — visible while agent awaits review */}

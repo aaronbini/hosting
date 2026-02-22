@@ -68,3 +68,5 @@ Thumbs.db       # Windows
 # Environment variables (sensitive information)
 # Use a separate file like .env for local environment variables and ignore it.
 .env
+
+notes.txt

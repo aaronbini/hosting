@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 class OutputFormat(str, Enum):
     GOOGLE_SHEET = "google_sheet"
-    GOOGLE_KEEP = "google_keep"
+    GOOGLE_TASKS = "google_tasks"
     IN_CHAT = "in_chat"
 
 
@@ -166,6 +166,13 @@ class EventPlanningData(BaseModel):
     # Cleared at the start of each apply_extraction call.
     last_url_extraction_result: Optional[dict] = Field(
         None, description="Success/failure of the most recent URL recipe extraction"
+    )
+
+    # Transient: ingredient lists just auto-generated for AI_DEFAULT dishes this turn.
+    # Each entry: {"dish": str, "ingredients": list[dict]}.
+    # Cleared at the start of each apply_extraction call.
+    last_generated_recipes: Optional[List[Dict]] = Field(
+        None, description="Newly generated default recipes to present to the user this turn"
     )
 
     # Recipe sources — populated during recipe_confirmation stage

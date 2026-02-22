@@ -74,5 +74,5 @@ class AgentState(BaseModel):
 
     # --- Step 7 outputs ---
     google_sheet_url: Optional[str] = None
-    google_keep_url: Optional[str] = None
+    google_tasks_url: Optional[str] = None
     formatted_chat_output: Optional[str] = None
