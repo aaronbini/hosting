@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { Recipe } from '../types'
 
 interface UploadResult {
   success: boolean
@@ -8,28 +9,26 @@ interface UploadResult {
 
 interface Props {
   sessionId: string
-  mealPlan: string[]
-  pendingDish?: string          // pre-select this dish (set by backend when user mentions a file)
+  recipes: Recipe[]  // recipes awaiting user-provided ingredients
   onUploadComplete?: (dishName: string) => void  // called after a successful upload
 }
 
 const ACCEPTED_TYPES = '.pdf,.txt,.jpg,.jpeg,.png,.webp'
 const ACCEPTED_LABEL = 'PDF, TXT, JPG, PNG, WEBP'
 
-export default function RecipeUploadPanel({ sessionId, mealPlan, pendingDish, onUploadComplete }: Props) {
-  const [selectedDish, setSelectedDish] = useState(pendingDish ?? mealPlan[0] ?? '')
+export default function RecipeUploadPanel({ sessionId, recipes, onUploadComplete }: Props) {
+  const [selectedDish, setSelectedDish] = useState(recipes[0]?.name ?? '')
   const [file, setFile] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
   const [result, setResult] = useState<UploadResult | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // When the backend signals a specific dish needs uploading, pre-select it
+  // Re-sync selection whenever the recipe list changes
   useEffect(() => {
-    if (pendingDish) {
-      setSelectedDish(pendingDish)
-      setResult(null)
-    }
-  }, [pendingDish])
+    const validDish = recipes.find(r => r.name === selectedDish) ? selectedDish : recipes[0]?.name ?? ''
+    setSelectedDish(validDish)
+    setResult(null)
+  }, [recipes, selectedDish])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -79,7 +78,7 @@ export default function RecipeUploadPanel({ sessionId, mealPlan, pendingDish, on
     }
   }
 
-  if (mealPlan.length === 0) return null
+  if (recipes.length === 0) return null
 
   return (
     <div className="border-t border-slate-200 bg-slate-50 px-4 py-3">
@@ -87,7 +86,7 @@ export default function RecipeUploadPanel({ sessionId, mealPlan, pendingDish, on
         Upload a recipe file
       </p>
       <form onSubmit={handleSubmit} className="flex flex-wrap items-end gap-2">
-        {/* Dish selector */}
+        {/* Dish selector — only shows recipes awaiting user input */}
         <div className="flex flex-col gap-1">
           <label className="text-xs text-slate-500">Dish</label>
           <select
@@ -95,8 +94,8 @@ export default function RecipeUploadPanel({ sessionId, mealPlan, pendingDish, on
             onChange={e => setSelectedDish(e.target.value)}
             className="text-sm border border-slate-300 rounded px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400"
           >
-            {mealPlan.map(dish => (
-              <option key={dish} value={dish}>{dish}</option>
+            {recipes.map(recipe => (
+              <option key={recipe.name} value={recipe.name}>{recipe.name}</option>
             ))}
           </select>
         </div>
@@ -119,9 +118,16 @@ export default function RecipeUploadPanel({ sessionId, mealPlan, pendingDish, on
           disabled={!file || !selectedDish || uploading}
           className="px-4 py-1.5 text-sm font-medium rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
-          {uploading ? 'Uploading…' : 'Upload'}
+          {uploading ? 'Extracting…' : 'Upload'}
         </button>
       </form>
+
+      {/* Processing message */}
+      {uploading && (
+        <p className="mt-2 text-xs text-slate-600 italic">
+          Extracting ingredients from your file (this may take a little while, hold tight)…
+        </p>
+      )}
 
       {/* Result */}
       {result && (

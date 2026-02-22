@@ -68,7 +68,7 @@ export default function EventDataPanel({ eventData, completionScore, isComplete 
         {eventData.total_guests && (
           <DetailItem
             label="Total Guests"
-            value={`${eventData.total_guests} (${eventData.adult_count} adults, ${eventData.child_count} children)`}
+            value={`${eventData.total_guests} (${eventData.adult_count ?? 0} adults, ${eventData.child_count ?? 0} children)`}
           />
         )}
 
@@ -121,14 +121,25 @@ export default function EventDataPanel({ eventData, completionScore, isComplete 
           </div>
         )}
 
-        {eventData.meal_plan && eventData.meal_plan.length > 0 && (
+        {eventData.meal_plan?.recipes && eventData.meal_plan.recipes.length > 0 && (
           <div className="pt-4 border-t border-slate-200">
             <p className="text-sm font-semibold text-slate-700 mb-2">Menu</p>
-            <ul className="space-y-1">
-              {eventData.meal_plan.map((dish: string, idx: number) => (
-                <li key={idx} className="text-sm text-slate-600 flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full flex-shrink-0"></span>
-                  {dish}
+            <ul className="space-y-2">
+              {eventData.meal_plan.recipes.map((recipe, idx: number) => (
+                <li key={idx} className="text-sm text-slate-600">
+                  <div className="flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full flex-shrink-0"></span>
+                    <span className="font-medium">{recipe.name}</span>
+                  </div>
+                  {recipe.status === 'placeholder' && (
+                    <span className="text-xs text-amber-600 ml-4">needs name</span>
+                  )}
+                  {recipe.status === 'named' && recipe.awaiting_user_input && (
+                    <span className="text-xs text-amber-600 ml-4">needs recipe</span>
+                  )}
+                  {recipe.status === 'complete' && (
+                    <span className="text-xs text-green-600 ml-4">✓ ready</span>
+                  )}
                 </li>
               ))}
             </ul>

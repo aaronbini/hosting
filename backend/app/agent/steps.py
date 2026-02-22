@@ -58,20 +58,21 @@ async def calculate_quantities(
     state.stage = AgentStage.CALCULATING_QUANTITIES
     logger.info(
         "[STEP 1] Starting calculate_quantities: %d dishes, %d adults, %d children",
-        len(state.event_data.meal_plan),
+        len(state.event_data.meal_plan.recipes),
         state.event_data.adult_count or 0,
         state.event_data.child_count or 0,
     )
 
-    meal_plan = state.event_data.meal_plan
+    # Extract dish names from MealPlan
+    dish_names = [recipe.name for recipe in state.event_data.meal_plan.recipes]
     adult_count = state.event_data.adult_count or 0
     child_count = state.event_data.child_count or 0
 
     # Ask Gemini to categorise each dish (one call, returns dict[str, DishCategory])
-    dish_categories: dict[str, DishCategory] = await ai_service.categorise_dishes(meal_plan)
+    dish_categories: dict[str, DishCategory] = await ai_service.categorise_dishes(dish_names)
 
     state.serving_specs = calculate_all_serving_specs(
-        meal_plan=meal_plan,
+        meal_plan=dish_names,
         dish_categories=dish_categories,
         adult_count=adult_count,
         child_count=child_count,
@@ -100,13 +101,13 @@ async def get_all_dish_ingredients(
         len(state.serving_specs),
     )
 
-    # Build a lookup of recipe sources by dish name (for user-provided recipes)
-    recipe_source_map = {rs.dish_name.lower(): rs for rs in state.event_data.recipe_sources}
+    # Build a lookup of recipes by dish name
+    recipe_map = {r.name.lower(): r for r in state.event_data.meal_plan.recipes}
 
     tasks = [
         ai_service.get_dish_ingredients(
             spec,
-            recipe_source=recipe_source_map.get(spec.dish_name.lower()),
+            recipe=recipe_map.get(spec.dish_name.lower()),
         )
         for spec in state.serving_specs
     ]

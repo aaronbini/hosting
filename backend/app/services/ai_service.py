@@ -1,14 +1,15 @@
 import datetime
 import json
+import logging
 import os
-from typing import Generator, Optional
+from typing import AsyncGenerator, Optional
 
 import httpx
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
-from app.models.event import EventPlanningData, ExtractionResult, RecipeSource
+from app.models.event import EventPlanningData, ExtractionResult, Recipe
 from app.models.shopping import (
     AggregatedIngredient,
     DishCategory,
@@ -17,6 +18,31 @@ from app.models.shopping import (
     RecipeIngredient,
     ShoppingList,
 )
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Schema helper for Gemini API compatibility
+# ---------------------------------------------------------------------------
+
+
+def _strip_additional_properties(schema: dict) -> dict:
+    """
+    Recursively remove 'additionalProperties' from a JSON schema dict.
+    The Gemini API doesn't support this OpenAPI 3.1 field that Pydantic v2 adds.
+    """
+    if isinstance(schema, dict):
+        schema.pop("additionalProperties", None)
+        for value in schema.values():
+            if isinstance(value, dict):
+                _strip_additional_properties(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        _strip_additional_properties(item)
+    return schema
+
 
 # ---------------------------------------------------------------------------
 # Shared ingredient unit rules — referenced in all ingredient-related prompts
@@ -31,7 +57,11 @@ CATEGORY_SERVING_HINTS: dict[str, str] = {
     DishCategory.SECONDARY_PROTEIN: "1 adult serving ≈ 3-4 oz of the protein",
     DishCategory.STARCH_SIDE: "1 adult serving ≈ 2-3 oz dry pasta/rice/grains, or 5-6 oz potato",
     DishCategory.VEGETABLE_SIDE: "1 adult serving ≈ 4 oz vegetables",
-    DishCategory.SALAD: "1 adult serving ≈ 2 oz leafy greens (plus dressing ingredients)",
+    DishCategory.SALAD: (
+        "1 adult serving ≈ 2-3 oz leafy greens for a green salad; "
+        "for hearty vegetable salads (fennel, beet, carrot, etc.) use count units "
+        "(e.g., 1 fennel bulb serves 3-4 people, 1 medium beet per 2 people)."
+    ),
     DishCategory.BREAD: "1 serving ≈ 1 roll or 2 slices",
     DishCategory.DESSERT: "1 adult serving ≈ 1 standard slice or portion",
     DishCategory.PASSED_APPETIZER: "1 serving ≈ 1-2 bite-sized pieces",
@@ -81,7 +111,14 @@ class _AggregatedItems(BaseModel):
 class _ExtractedRecipe(BaseModel):
     """Response schema for recipe extraction from URL/file/description."""
 
+    dish_name: Optional[str] = None  # Actual dish name extracted from recipe (e.g., "Spaghetti Carbonara")
     ingredients: list[RecipeIngredient]
+
+
+class _BatchExtractedRecipes(BaseModel):
+    """Response schema for batched default recipe generation."""
+
+    dishes: list[_ExtractedRecipe]
 
 
 class GeminiService:
@@ -100,8 +137,11 @@ class GeminiService:
 
         self.client = genai.Client(api_key=key)
         self.model_name = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+        self.fast_model_name = os.getenv("GEMINI_FAST_MODEL", "gemini-2.5-flash-lite")
 
         self.system_prompt = """You are a conversational event planning assistant helping someone plan a menu, as well as how much food to buy for their event.
+
+                            CRITICAL: Never output thinking, reasoning, or internal dialogue in your responses. Only output the final conversational text meant for the user to read. Do not use <thinking>, <thought>, or similar tags. Keep your responses focused and user-facing only.
 
                             CURRENT STAGE: {conversation_stage}
                             CURRENT EVENT DATA: {event_data_json}
@@ -115,13 +155,25 @@ class GeminiService:
                               Your goal: collect event details AND arrive at a specific list of dishes (the meal plan).
 
                               IMPORTANT — Recipe promises take priority:
-                                Check CURRENT EVENT DATA for "recipe_promises". If it is non-empty, you MUST:
-                                1. Focus EXCLUSIVELY on collecting those recipe sources.
-                                2. Do NOT present a full provisional menu for all dishes.
-                                3. Do NOT move on to other topics.
-                                4. For each promised dish, ask how the user wants to share the recipe:
-                                   URL (paste in chat), file (upload panel below), or describe it.
-                                5. Handle one at a time. Once all recipe_promises are empty, you can proceed normally.
+                                Check CURRENT EVENT DATA → meal_plan → recipes for any with "awaiting_user_input": true.
+                                If ANY exist, you MUST:
+                                1. Focus EXCLUSIVELY on collecting those recipe sources. Do NOT suggest additional menu items.
+                                2. Do NOT present a full provisional menu for other dishes until all awaiting_user_input recipes are resolved.
+                                3. Do NOT move on to other topics (cuisines, sides, beverages, desserts, etc.).
+                                4. For each dish awaiting user input, ask how the user wants to share the recipe:
+                                   - URL: They can paste a recipe URL in chat
+                                   - File upload: They can use the recipe upload panel below the chat (supports PDF, TXT, images)
+                                   - Description: They can describe the ingredients in chat
+                                5. Handle recipes one at a time. Once ALL recipes have awaiting_user_input: false, you can proceed normally.
+                                6. When directing the user to upload a file, remind them that the upload panel
+                                   lists ALL pending recipe dishes — they must confirm the correct dish name
+                                   is selected in the dropdown before hitting Upload.
+
+                                Example check:
+                                  "meal_plan": {{"recipes": [
+                                    {{"name": "Focaccia", "awaiting_user_input": true}},  ← MUST COLLECT THIS FIRST
+                                    {{"name": "Grilled Chicken", "awaiting_user_input": false}}  ← This is fine
+                                  ]}}
 
                               Phase 1 — Event basics (ask one question at a time):
                                 1. Event/Meal type  2. Guest count (adults/children)
@@ -134,12 +186,17 @@ class GeminiService:
                                 - ALWAYS ask first: "Do you have specific dishes in mind, or would you like me
                                   to suggest a menu?"
                                 - If user provides dishes: acknowledge them, ask if they want to add more
-                                  categories (appetizer, sides, dessert, beverages).
-                                - If user wants suggestions: propose a COMPLETE menu (main, sides, dessert)
-                                  based on cuisine preference, guest count, and event type. Present it as a
-                                  numbered list they can modify.
+                                  categories (appetizer, sides, dessert, beverages). Treat beverages as
+                                  part of the meal plan (e.g., "Wine", "Beer", "Sparkling Water").
+                                - If user wants suggestions (for a full menu or specific categories): be
+                                  creative and specific — avoid the most predictable or generic dishes for
+                                  this cuisine. Consider regional variations (e.g., Sicilian vs Milanese vs
+                                  Roman for Italian), dishes with interesting textures or cooking methods,
+                                  and less-obvious but crowd-pleasing options. Think of what an inspired
+                                  home cook would serve, not a generic restaurant menu. Present suggestions
+                                  as a numbered list they can modify.
                                 - If user provides SOME dishes and wants help with others: suggest dishes
-                                  that complement what they already chose.
+                                  that complement what they already chose, with the same creative spirit.
                                 - If user mentions having their OWN recipe for any dish at any point,
                                   immediately ask for it (URL, file, or description) before continuing.
                                   Do NOT ignore recipe mentions or defer them to later.
@@ -164,13 +221,14 @@ class GeminiService:
                               PRESENTING NEWLY GENERATED RECIPES:
                               If "last_generated_recipes" appears in CURRENT EVENT DATA, the system just generated
                               default ingredient lists for those dishes. You MUST present them to the user now.
-                              Format each dish like this (use a bullet list for ingredients):
+                              Format each dish like this (use a bullet list for ingredients).
+                              List ingredient NAMES ONLY — no quantities or amounts:
 
                               "Here's the recipe I'll use for each dish — let me know if anything looks off:
 
                               **[Dish Name]**
-                              • ingredient 1
-                              • ingredient 2
+                              • ingredient name
+                              • ingredient name
                               • …
 
                               **[Next Dish]**
@@ -262,6 +320,16 @@ class GeminiService:
     # Private helpers
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def _event_data_for_prompt(event_data: EventPlanningData) -> dict:
+        """
+        Serialize event_data for inclusion in a prompt, stripping fields that add
+        bulk without helping the model (extracted ingredient lists, transient signals
+        that are already handled by the prompt template).
+        """
+        d = event_data.model_dump(exclude_none=True)
+        return d
+
     def _build_chat_context(
         self,
         user_message: str,
@@ -269,66 +337,102 @@ class GeminiService:
         conversation_history: list,
     ) -> tuple[str, list]:
         """Return (system_prompt_with_context, contents_list) for a chat call."""
-        event_json = json.dumps(event_data.model_dump(exclude_none=True), indent=2)
+        event_json = json.dumps(self._event_data_for_prompt(event_data), indent=2)
         system_with_context = self.system_prompt.format(
             event_data_json=event_json, conversation_stage=event_data.conversation_stage
         )
+
+        # Add explicit pending recipe context to make them IMPOSSIBLE to miss
+        pending_recipes = [r.name for r in event_data.meal_plan.pending_user_recipes]
+        if pending_recipes:
+            pending_context = (
+                f"\n\n⚠️  URGENT: User has promised recipes for: {', '.join(pending_recipes)}\n"
+                f"You MUST collect these recipes before suggesting additional menu items.\n"
+                f"Do NOT propose new dishes until all awaiting_user_input recipes are resolved."
+            )
+            system_with_context += pending_context
         contents = [
             types.Content(
                 role="user" if msg.role == "user" else "model",
                 parts=[types.Part(text=msg.content)],
             )
-            for msg in conversation_history[-10:]
+            for msg in conversation_history
         ]
         contents.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
         return system_with_context, contents
 
-    async def _async_json_call(self, contents, schema, *, temperature: float | None = None):
+    async def _async_json_call(
+        self,
+        contents,
+        schema,
+        *,
+        temperature: float | None = None,
+        model: str | None = None,
+    ):
         """Call Gemini async in JSON mode and return the parsed response object."""
+        # If schema is a Pydantic model, convert to dict and strip additionalProperties
+        schema_class = None
+        if isinstance(schema, type) and issubclass(schema, BaseModel):
+            schema_class = schema
+            schema = _strip_additional_properties(schema.model_json_schema())
+
         config_kwargs: dict = {"response_mime_type": "application/json", "response_schema": schema}
         if temperature is not None:
             config_kwargs["temperature"] = temperature
         response = await self.client.aio.models.generate_content(
-            model=self.model_name,
+            model=model or self.model_name,
             contents=contents,
             config=types.GenerateContentConfig(**config_kwargs),
         )
+
+        # If we stripped the schema, parse response back into the Pydantic model
+        if schema_class:
+            return schema_class.model_validate(response.parsed)
         return response.parsed
 
     # -----------------------------------------------------------------------
     # Chat response methods
     # -----------------------------------------------------------------------
 
-    def generate_response(
+    async def generate_response(
         self, user_message: str, event_data: EventPlanningData, conversation_history: list
     ) -> str:
         """Generate conversational AI response using Gemini."""
         system_with_context, contents = self._build_chat_context(
             user_message, event_data, conversation_history
         )
-        response = self.client.models.generate_content(
+        response = await self.client.aio.models.generate_content(
             model=self.model_name,
             contents=contents,
-            config=types.GenerateContentConfig(system_instruction=system_with_context),
+            config=types.GenerateContentConfig(system_instruction=system_with_context, temperature=1.1),
         )
         return response.text
 
-    def generate_response_stream(
+    async def generate_response_stream(
         self, user_message: str, event_data: EventPlanningData, conversation_history: list
-    ) -> Generator[str, None, None]:
+    ) -> AsyncGenerator[str, None]:
         """Yield text chunks as Gemini streams the response."""
         system_with_context, contents = self._build_chat_context(
             user_message, event_data, conversation_history
         )
-        for chunk in self.client.models.generate_content_stream(
+        logger.info(
+            "🤖 AI CALL: generate_response_stream (stage=%s, history_len=%d)",
+            event_data.conversation_stage,
+            len(conversation_history),
+        )
+        stream = await self.client.aio.models.generate_content_stream(
             model=self.model_name,
             contents=contents,
-            config=types.GenerateContentConfig(system_instruction=system_with_context),
-        ):
+            config=types.GenerateContentConfig(system_instruction=system_with_context, temperature=1.1),
+        )
+        chunk_count = 0
+        async for chunk in stream:
             if chunk.text:
+                chunk_count += 1
                 yield chunk.text
+        logger.info("✅ AI RESPONSE: generate_response_stream → %d chunks", chunk_count)
 
-    def extract_event_data(
+    async def extract_event_data(
         self,
         user_message: str,
         current_event_data: EventPlanningData,
@@ -343,7 +447,7 @@ class GeminiService:
         last_assistant_message: the previous AI turn, used so the extractor can
         infer which dishes the user is confirming when they say "yes, looks good."
         """
-        current_json = json.dumps(current_event_data.model_dump(exclude_none=True), indent=2)
+        current_json = json.dumps(self._event_data_for_prompt(current_event_data), indent=2)
         stage = current_event_data.conversation_stage
 
         assistant_context = (
@@ -369,45 +473,80 @@ class GeminiService:
 
                     IF stage == "gathering":
                     - Extract standard event fields (event_type, guest counts, cuisine, etc.) as before.
-                    - For meal_plan_additions: list any SPECIFIC dish names that are now part of the agreed
-                      menu. This includes:
-                      (a) dishes the user explicitly names in their message, AND
-                      (b) dishes proposed by the assistant (in the previous message) that the user is now
-                          confirming (e.g., user says "yes", "looks good", "that works", "perfect").
-                      Only include concrete dishes ("pasta carbonara", "ribs"), NOT vague categories
-                      ("something Italian", "a side dish").
-                    - For meal_plan_removals: list dishes the user explicitly says to remove or replace.
+                    - For recipe_updates: list RecipeUpdate objects for any meal plan changes:
+
+                      ⚠️  IMPORTANT: If there are existing recipes with awaiting_user_input=true, do NOT
+                      extract new recipe additions from the user's message UNLESS the user explicitly
+                      requests additional dishes. Focus on collecting the promised recipes first.
+
+                      ACTION "add": When user names a new dish or confirms a suggested dish.
+                      - recipe_name: The dish name (can be placeholder like "main" or specific like "Spaghetti")
+                      - status: "placeholder" if generic (main/side/dessert), "named" if specific
+                      - awaiting_user_input: true if user said they have their own recipe, false otherwise
+                      Example: User says "I have a recipe for a main" →
+                        {{"recipe_name": "main", "action": "add", "status": "placeholder", "awaiting_user_input": true}}
+                      Example: User says "Let's do focaccia" →
+                        {{"recipe_name": "focaccia", "action": "add", "status": "named", "awaiting_user_input": false}}
+
+                      BEVERAGES: When user mentions beverages, add them as recipes with recipe_type="drink":
+                      - Add each beverage type as a separate recipe (e.g., "Wine", "Beer", "Sparkling Water")
+                      - Set recipe_type to "drink"
+                      - Set preparation_method to "store_bought" (user can override later if making cocktails/infused drinks from scratch)
+                      - Set status to "named" (the agent will generate quantities later)
+                      - Set awaiting_user_input to false
+                      - Also populate beverages_preferences field for backward compatibility
+                      Example: User says "We'll have wine and beer" →
+                        {{"recipe_name": "Wine", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "store_bought", "awaiting_user_input": false}}
+                        {{"recipe_name": "Beer", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "store_bought", "awaiting_user_input": false}}
+
+                      FOOD ITEMS: For food dishes:
+                      - Set recipe_type to "food" (this is the default, so you can omit it)
+                      - Set preparation_method to "homemade" (this is the default, so you can omit it)
+                      - User can explicitly request store-bought items (e.g., "let's just buy pre-made guacamole")
+                      Example: User says "let's get store-bought hummus" →
+                        {{"recipe_name": "Hummus", "action": "add", "status": "named", "recipe_type": "food", "preparation_method": "store_bought", "awaiting_user_input": false}}
+
+                      ACTION "remove": When user explicitly removes a dish.
+                      - recipe_name: The dish to remove
+                      Example: {{"recipe_name": "salad", "action": "remove"}}
+
+                      ACTION "update": When user provides recipe details or refines a placeholder.
+                      - recipe_name: Current dish name
+                      - new_name: New name if renaming (e.g., "main" → "Spaghetti Carbonara")
+                      - status: New status if changing
+                      - awaiting_user_input: Set false when user provides recipe
+                      - url: If user provides a URL for this recipe
+                      - description: If user describes ingredients/changes
+                      Example: User uploaded file for "main" (handled by endpoint, not extraction)
+                      Example: User says "the main is Spaghetti Carbonara" →
+                        {{"recipe_name": "main", "action": "update", "new_name": "Spaghetti Carbonara", "status": "named"}}
+                      Example: User provides URL →
+                        {{"recipe_name": "focaccia", "action": "update", "url": "https://...", "source_type": "user_url"}}
+
+                      CRITICAL — Confirming a suggested dish for a placeholder:
+                      When the user says "yes", "looks good", or otherwise confirms a menu
+                      that the assistant just suggested, check the Previous assistant message
+                      for specific dish names. For each PLACEHOLDER recipe in Current known
+                      data (status="placeholder"), find the matching suggested dish by role
+                      (e.g., "main" placeholder → the main course suggestion) and rename it
+                      using action "update" — do NOT add it as a new recipe.
+                      Example: "main" placeholder exists, previous assistant suggested
+                      "Slow-braised Beef Short Rib Ragu" for the main, user says "yes" →
+                        {{"recipe_name": "main", "action": "update", "new_name": "Slow-braised Beef Short Rib Ragu", "status": "named"}}
+
                     - For meal_plan_confirmed: set to true ONLY if the user explicitly confirms the full
                       menu is complete ("looks good", "yes let's go with that menu", "that's everything").
                     - Include "meal_plan" in answered_questions ONLY when meal_plan_confirmed is true,
                       NOT when individual dishes are first mentioned.
-                    - For recipe_promise_additions: list any dishes where the user explicitly says they
-                      have their OWN recipe (e.g., "I have a recipe for X", "I found X on NYTimes",
-                      "I have a PDF for X"). Do NOT include dishes the assistant is assuming defaults for.
-                    - For recipe_promise_resolutions: list dishes whose recipe promise is now resolved
-                      in this message — i.e., the user described the recipe, said to use your best guess,
-                      or explicitly gave up on providing a specific recipe for that dish.
-                    - For pending_upload_dish: set to the dish name if the user explicitly says they have
-                      a FILE (PDF, photo, screenshot, recipe card) to upload for a specific dish. Set to
-                      null in all other cases (URL, description, general message, unrelated messages).
 
                     IF stage == "recipe_confirmation":
-                    - Focus on recipe_confirmations: for each dish the user addresses, include an entry
-                      with dish_name, confirmed (true/false), and optionally source_type, description, url.
-                    - If the user provides a URL for a dish's recipe, set url to that URL and
-                      source_type to "user_url". The system will auto-fetch and extract it.
-                    - If the user describes the recipe or key ingredients (e.g., "use lemon juice and
-                      olive oil", "add garlic and herbs", "make it with butter instead of oil"), set
-                      source_type to "user_description" and put the description in the description field.
-                      Include ALL ingredient corrections/changes the user described.
-                    - If the user simply confirms the AI-generated recipe is fine (e.g., "looks good",
-                      "that's perfect", "yes"), set confirmed to true but leave source_type null.
-                    - Set recipes_confirmed to true ONLY if the user confirms ALL recipes are good.
-                    - Set pending_upload_dish to the dish name if the user indicates they have a FILE
-                      (PDF, photo, screenshot, recipe card) to upload for a specific dish. Set to null
-                      in all other cases (URL, description, general confirmation, unrelated messages).
-                    - Ignore event-level fields (event_type, guest_count, etc.) unless the user is
-                      explicitly correcting them.
+                    - Use recipe_updates to handle recipe changes:
+                      - ACTION "update" when user provides URL, description, or confirms AI recipe
+                      - Set url/description/source_type as appropriate
+                      - Set awaiting_user_input to false when user provides the recipe
+                      Example: {{"recipe_name": "Caesar Salad", "action": "update", "awaiting_user_input": false}}
+                    - Set meal_plan_confirmed to true ONLY if user confirms ALL recipes are good.
+                    - Ignore event-level fields unless the user is explicitly correcting them.
 
                     IF stage == "selecting_output":
                     - Focus on output_formats: extract the user's chosen format(s) as a list.
@@ -420,16 +559,25 @@ class GeminiService:
                     User message: "{user_message}"
                 """
 
-        response = self.client.models.generate_content(
+        logger.info("🤖 AI CALL: extract_event_data (stage=%s, user_msg_len=%d)", stage, len(user_message))
+
+        response = await self.client.aio.models.generate_content(
             model=self.model_name,
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=ExtractionResult,
+                response_schema=_strip_additional_properties(ExtractionResult.model_json_schema()),
             ),
         )
 
-        return response.parsed
+        result = ExtractionResult.model_validate(response.parsed)
+        logger.info(
+            "✅ AI RESPONSE: extract_event_data → recipe_updates=%s, meal_plan_confirmed=%s, answered_questions=%s",
+            len(result.recipe_updates) if result.recipe_updates else 0,
+            result.meal_plan_confirmed,
+            result.answered_questions,
+        )
+        return result
 
     # -----------------------------------------------------------------------
     # Recipe extraction methods (called from API endpoints)
@@ -459,39 +607,55 @@ class GeminiService:
 
     async def extract_recipe_from_file(
         self, content: bytes, mime_type: str
-    ) -> list[RecipeIngredient]:
-        """Extract ingredients from an uploaded file (image via vision, text/PDF via text)."""
+    ) -> tuple[Optional[str], list[RecipeIngredient]]:
+        """Extract dish name and ingredients from an uploaded file.
+
+        Returns: (dish_name, ingredients) where dish_name may be None if not found.
+        """
         if mime_type.startswith("image/"):
-            contents = [
+            parts = [
                 types.Part.from_bytes(data=content, mime_type=mime_type),
                 types.Part(
                     text=(
-                        "Extract the ingredient list from this recipe image.\n\n"
+                        "Extract the dish name and ingredient list from this recipe image.\n\n"
                         "Rules:\n"
+                        "- For dish_name: extract the recipe title/name (e.g., 'Spaghetti Carbonara', 'Chocolate Chip Cookies'). "
+                        "If no clear title is visible, leave it null.\n"
                         "- Extract ONLY ingredients, not instructions.\n"
                         "- Standardise names ('olive oil' not 'EVOO').\n"
                         + INGREDIENT_UNIT_RULES
                         + "- Assign each ingredient the most appropriate grocery_category.\n"
-                        "- If the image doesn't contain a recipe, return an empty ingredients list."
+                        "- If the image doesn't contain a recipe, return null dish_name and empty ingredients list."
                     )
                 ),
             ]
+            response = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=parts,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=_ExtractedRecipe,
+                ),
+            )
+            return (response.parsed.dish_name, response.parsed.ingredients)
         else:
             text_content = content.decode("utf-8", errors="replace")[:_MAX_CONTENT_CHARS]
-            contents = f"""Extract the ingredient list from this recipe text.
+            contents = f"""Extract the dish name and ingredient list from this recipe text.
 
                         Rules:
+                        - For dish_name: extract the recipe title/name (e.g., "Spaghetti Carbonara", "Chocolate Chip Cookies").
+                          If no clear title is present, leave it null.
                         - Extract ONLY ingredients, not instructions.
                         - Standardise names ("olive oil" not "EVOO").
                         {INGREDIENT_UNIT_RULES}
                         - Assign each ingredient the most appropriate grocery_category.
-                        - If the text doesn't contain a recipe, return an empty ingredients list.
+                        - If the text doesn't contain a recipe, return null dish_name and empty ingredients list.
 
                         Recipe text:
                         {text_content}
                         """
         result = await self._async_json_call(contents, _ExtractedRecipe)
-        return result.ingredients
+        return (result.dish_name, result.ingredients)
 
     async def generate_default_recipe(self, dish_name: str) -> list[RecipeIngredient]:
         """
@@ -500,18 +664,43 @@ class GeminiService:
         Produces a base-quantity recipe (for ~4 adult servings). The agent
         scales these to the actual guest count later via get_dish_ingredients.
         """
-        prompt = f"""Provide a complete ingredient list for a classic version of: {dish_name}
+        results = await self.generate_default_recipes_batch([dish_name])
+        return results[0]
+
+    async def generate_default_recipes_batch(
+        self, dish_names: list[str]
+    ) -> list[list[RecipeIngredient]]:
+        """
+        Generate ingredient lists for multiple dishes in a single AI call.
+
+        Uses a lighter/faster model since this is a simple structured task.
+        Returns a list of ingredient lists in the same order as dish_names.
+        """
+        if not dish_names:
+            return []
+
+        dishes_list = "\n".join(f"- {name}" for name in dish_names)
+        prompt = f"""Provide complete ingredient lists for each of these dishes:
+                    {dishes_list}
 
                     Rules:
-                    - Use a standard recipe for 4 adult servings.
-                    - List all ingredients needed to make this dish.
+                    - Use a standard recipe for 4 adult servings per dish.
+                    - Return one entry in 'dishes' per dish, in the same order listed above.
+                    - List all ingredients needed to make each dish.
                     - Standardise names ("olive oil" not "EVOO", "spring onions" not "scallions").
                     {INGREDIENT_UNIT_RULES}
                     - Assign each ingredient the most appropriate grocery_category.
                     - Do NOT include water.
                     """
-        result = await self._async_json_call(prompt, _ExtractedRecipe, temperature=0.2)
-        return result.ingredients
+        logger.info("🤖 AI CALL: generate_default_recipes_batch (dishes=%d, model=%s)", len(dish_names), self.fast_model_name)
+        result = await self._async_json_call(
+            prompt,
+            _BatchExtractedRecipes,
+            temperature=0.2,
+            model=self.fast_model_name,
+        )
+        logger.info("✅ AI RESPONSE: generate_default_recipes_batch → %d dishes", len(result.dishes))
+        return [dish.ingredients for dish in result.dishes]
 
     async def extract_recipe_from_description(self, description: str) -> list[RecipeIngredient]:
         """
@@ -534,7 +723,7 @@ class GeminiService:
                     {INGREDIENT_UNIT_RULES}
                     - Assign each ingredient the most appropriate grocery_category.
                     """
-        result = await self._async_json_call(prompt, _ExtractedRecipe)
+        result = await self._async_json_call(prompt, _ExtractedRecipe, model=self.fast_model_name)
         return result.ingredients
 
     # -----------------------------------------------------------------------
@@ -549,6 +738,7 @@ class GeminiService:
         quantity_engine.calculate_all_serving_specs() to look up per-person
         serving multipliers.
         """
+        logger.info("🤖 AI CALL: categorise_dishes (dishes=%d)", len(meal_plan))
         dish_list = "\n".join(f"- {dish}" for dish in meal_plan)
         categories_list = ", ".join(c.value for c in DishCategory)
 
@@ -565,38 +755,73 @@ class GeminiService:
                     - Beverages always get a beverage category; appetisers get passed_appetizer.
                     """
         mapping: _DishCategoryMapping = await self._async_json_call(
-            prompt, _DishCategoryMapping, temperature=0.0
+            prompt, _DishCategoryMapping, temperature=0.0, model=self.fast_model_name
         )
-        return {item.dish_name: item.category for item in mapping.items}
+        result = {item.dish_name: item.category for item in mapping.items}
+        logger.info("✅ AI RESPONSE: categorise_dishes → %s", result)
+        return result
 
     async def get_dish_ingredients(
         self,
         spec: DishServingSpec,
-        recipe_source: Optional["RecipeSource"] = None,
+        recipe: Optional["Recipe"] = None,
     ) -> DishIngredients:
         """
         Given a DishServingSpec (dish name + serving counts), return a
         scaled ingredient list for that exact number of servings.
 
-        If recipe_source has extracted_ingredients (from URL/file/description),
+        If recipe has ingredients (from URL/file/description/AI default),
         those are included in the prompt so Gemini scales the user's actual recipe
         rather than inventing one.
 
         One call per dish — these are fanned out in parallel by
         agent/steps.py:get_all_dish_ingredients().
         """
-        # Build recipe context from user-provided source if available
+        # Build recipe context from user-provided recipe if available.
+        # Always include the base serving count so Gemini knows the scale factor
+        # (total_servings / base_servings), not total_servings as a raw multiplier.
         recipe_context = ""
-        if recipe_source and recipe_source.extracted_ingredients:
+        if recipe and recipe.ingredients:
+            base_servings = recipe.servings or 4
             recipe_context = (
-                f"\n                    The user provided this recipe's ingredient list (scale these):\n"
-                f"                    {json.dumps(recipe_source.extracted_ingredients, indent=2)}\n"
+                f"\n The user provided this recipe's ingredient list"
+                f" (this recipe makes {base_servings} servings —"
+                f" scale it to {spec.total_servings} servings):\n"
+                f" {json.dumps(recipe.ingredients, indent=2)}\n"
             )
 
         serving_hint = CATEGORY_SERVING_HINTS.get(spec.dish_category, "")
         serving_hint_line = f"- Serving size reference: {serving_hint}" if serving_hint else ""
 
-        prompt = f"""You are a professional chef. Provide a complete ingredient list for:
+        # Special handling for beverages - they should just list the beverage, not a recipe
+        is_beverage = spec.dish_category in (
+            DishCategory.BEVERAGE_ALCOHOLIC,
+            DishCategory.BEVERAGE_NONALCOHOLIC,
+        )
+
+        if is_beverage:
+            prompt = f"""You are a professional chef. Provide the ingredient list for this BEVERAGE:
+
+                    Beverage: {spec.dish_name}
+                    Dish category: {spec.dish_category}
+                    Adult servings: {spec.adult_servings}
+                    Child servings: {spec.child_servings}
+                    Total servings: {spec.total_servings}
+
+                    CRITICAL: This is a BEVERAGE, not a food dish. Return ONLY the beverage itself as the ingredient.
+                    Do NOT create a recipe or list ingredients for a sauce/dish that uses this beverage.
+
+                    Rules for beverages:
+                    - For wine: list "wine" (red/white/rosé as appropriate) in bottles
+                    - For beer: list "beer" in cans or bottles
+                    - For cocktails: list the spirits and mixers needed
+                    - For non-alcoholic: list the beverage (water, juice, soda, etc.)
+                    {serving_hint_line}
+                    {INGREDIENT_UNIT_RULES}
+                    - Use appropriate units: bottles for wine, cans/bottles for beer, liters for bulk drinks
+                    """
+        else:
+            prompt = f"""You are a professional chef. Provide a complete ingredient list for:
 
                     Dish: {spec.dish_name}
                     Dish category: {spec.dish_category}
@@ -616,11 +841,25 @@ class GeminiService:
                     - If user-provided ingredients are included above, use those as the base
                       recipe and scale them. Do NOT substitute different ingredients.
                     """
+        logger.info(
+            "🤖 AI CALL: get_dish_ingredients (dish=%s, category=%s, servings=%d)",
+            spec.dish_name,
+            spec.dish_category.value,
+            spec.total_servings,
+        )
+        # Use fast model when scaling existing ingredients; main model when generating from scratch
+        model = self.fast_model_name if (recipe and recipe.ingredients) else self.model_name
+        logger.info(f"Getting ingredients for recipe: {recipe.model_dump() if recipe else 'No user-provided recipe'}")
         result: DishIngredients = await self._async_json_call(
-            prompt, DishIngredients, temperature=0.0
+            prompt, DishIngredients, temperature=0.0, model=model
         )
         # Ensure the serving_spec is attached (Gemini won't include it)
         result.serving_spec = spec
+        logger.info(
+            "✅ AI RESPONSE: get_dish_ingredients (%s) → %d ingredients",
+            spec.dish_name,
+            len(result.ingredients),
+        )
         return result
 
     async def aggregate_ingredients(
@@ -636,6 +875,7 @@ class GeminiService:
         Note: meal_plan, adult_count, child_count, total_guests are populated
         by the runner from AgentState — Gemini only returns the items list.
         """
+        logger.info("🤖 AI CALL: aggregate_ingredients (dishes=%d)", len(all_dish_ingredients))
         dishes_json = json.dumps([d.model_dump() for d in all_dish_ingredients], indent=2)
 
         prompt = f"""You are a grocery list builder. Aggregate the ingredient lists
@@ -655,8 +895,9 @@ class GeminiService:
                     {dishes_json}
                     """
         result: _AggregatedItems = await self._async_json_call(
-            prompt, _AggregatedItems, temperature=0.0
+            prompt, _AggregatedItems, temperature=0.0, model=self.fast_model_name
         )
+        logger.info("✅ AI RESPONSE: aggregate_ingredients → %d unique items", len(result.items))
         # Construct ShoppingList — runner fills in guest counts from AgentState
         return ShoppingList(
             meal_plan=[d.dish_name for d in all_dish_ingredients],
