@@ -23,6 +23,7 @@ export interface EventData {
   pending_upload_dish?: string
   budget?: number
   budget_per_person?: number
+  output_formats: string[]
   conversation_stage: string
   answered_questions: Record<string, boolean>
   is_complete: boolean

@@ -19,6 +19,7 @@ class SessionData:
         self.conversation_history: list[ChatMessage] = []
         self.event_data = EventPlanningData()
         self.agent_state: Optional["AgentState"] = None  # cached after agent completes
+        self.google_credentials: Optional[dict] = None  # serialized OAuth token dict
 
     def add_message(self, role: MessageRole, content: str):
         """Add a message to conversation history"""
@@ -43,6 +44,7 @@ class SessionData:
             "last_updated": self.last_updated.isoformat(),
             "event_data": self.event_data.model_dump(),
             "conversation_length": len(self.conversation_history),
+            "google_connected": self.google_credentials is not None,
         }
 
 

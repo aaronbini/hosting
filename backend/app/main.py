@@ -1,10 +1,13 @@
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 from app.models.chat import ChatRequest, ChatResponse, MessageRole
 from app.models.event import ExtractionResult, OutputFormat, RecipeSource, RecipeSourceType
@@ -55,6 +58,52 @@ app.add_middleware(
 
 
 # ============================================================================
+# Google OAuth constants (used by helpers and endpoints below)
+# ============================================================================
+
+GOOGLE_TASKS_SCOPE = "https://www.googleapis.com/auth/tasks"
+_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
+_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
+_OAUTH_REDIRECT_URI = os.getenv(
+    "GOOGLE_OAUTH_REDIRECT_URI", "http://localhost:8001/api/auth/google/callback"
+)
+
+# ============================================================================
+# Shared helpers
+# ============================================================================
+
+
+def _find_or_create_recipe_source(event_data, dish_name: str) -> RecipeSource:
+    """Return the RecipeSource for dish_name, creating and appending one if not found."""
+    rs = next(
+        (rs for rs in event_data.recipe_sources if rs.dish_name.lower() == dish_name.lower()),
+        None,
+    )
+    if rs is None:
+        rs = RecipeSource(dish_name=dish_name)
+        event_data.recipe_sources.append(rs)
+    return rs
+
+
+def _build_oauth_flow():
+    """Build a Google OAuth Flow from environment config."""
+    from google_auth_oauthlib.flow import Flow
+
+    return Flow.from_client_config(
+        {
+            "web": {
+                "client_id": _OAUTH_CLIENT_ID,
+                "client_secret": _OAUTH_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        },
+        scopes=[GOOGLE_TASKS_SCOPE],
+        redirect_uri=_OAUTH_REDIRECT_URI,
+    )
+
+
+# ============================================================================
 # Post-extraction processing (shared by REST and WebSocket handlers)
 # ============================================================================
 
@@ -74,6 +123,7 @@ def apply_extraction(session: SessionData, extraction: ExtractionResult) -> None
 
     # Clear transient fields that are only valid for one turn
     event_data.last_url_extraction_result = None
+    event_data.last_generated_recipes = None
 
     # 1. Apply standard extracted fields (exclude special fields)
     exclude_fields = {
@@ -165,8 +215,11 @@ def apply_extraction(session: SessionData, extraction: ExtractionResult) -> None
     # 8. Stage transitions
     if event_data.conversation_stage == "gathering" and event_data.is_complete:
         event_data.conversation_stage = "recipe_confirmation"
-        # Initialize recipe_sources for each dish
-        event_data.recipe_sources = [RecipeSource(dish_name=dish) for dish in event_data.meal_plan]
+        # Add recipe_sources for any dish not already tracked (preserves uploads done during gathering)
+        existing_dishes = {rs.dish_name.lower() for rs in event_data.recipe_sources}
+        for dish in event_data.meal_plan:
+            if dish.lower() not in existing_dishes:
+                event_data.recipe_sources.append(RecipeSource(dish_name=dish))
 
     elif event_data.conversation_stage == "recipe_confirmation":
         if extraction.recipes_confirmed or all(rs.confirmed for rs in event_data.recipe_sources):
@@ -340,7 +393,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 )
                 apply_extraction(session, extraction)
 
-                # Auto-extract any recipe URL provided in this message.
+                # Auto-extract any recipe URL or description provided in this message.
                 # Must run before AI response so the AI can surface failures/successes.
                 for rc in extraction.recipe_confirmations or []:
                     if rc.url:
@@ -348,12 +401,13 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                             ingredients = await ai_service.extract_recipe_from_url(rc.url)
                             if not ingredients:
                                 raise ValueError("No ingredient list found on that page")
-                            for rs in session.event_data.recipe_sources:
-                                if rs.dish_name.lower() == rc.dish_name.lower():
-                                    rs.source_type = RecipeSourceType.USER_URL
-                                    rs.url = rc.url
-                                    rs.extracted_ingredients = [i.model_dump() for i in ingredients]
-                                    rs.confirmed = True
+                            rs_to_update = _find_or_create_recipe_source(
+                                session.event_data, rc.dish_name
+                            )
+                            rs_to_update.source_type = RecipeSourceType.USER_URL
+                            rs_to_update.url = rc.url
+                            rs_to_update.extracted_ingredients = [i.model_dump() for i in ingredients]
+                            rs_to_update.confirmed = True
                             # Resolve the promise if it exists
                             session.event_data.recipe_promises = [
                                 p
@@ -374,10 +428,66 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 "success": False,
                                 "error": str(url_err),
                             }
+                    elif rc.description and rc.source_type == "user_description":
+                        try:
+                            ingredients = await ai_service.extract_recipe_from_description(
+                                rc.description
+                            )
+                            rs_to_update = _find_or_create_recipe_source(
+                                session.event_data, rc.dish_name
+                            )
+                            rs_to_update.source_type = RecipeSourceType.USER_DESCRIPTION
+                            rs_to_update.description = rc.description
+                            rs_to_update.extracted_ingredients = [i.model_dump() for i in ingredients]
+                            rs_to_update.confirmed = True
+                            session.event_data.recipe_promises = [
+                                p
+                                for p in session.event_data.recipe_promises
+                                if p.lower() != rc.dish_name.lower()
+                            ]
+                        except Exception as desc_err:
+                            logger.warning(
+                                "Description extraction failed for '%s': %s",
+                                rc.dish_name,
+                                desc_err,
+                            )
+
+                # During recipe_confirmation, auto-generate default ingredient lists for
+                # any AI_DEFAULT dish that hasn't been generated yet.
+                if session.event_data.conversation_stage == "recipe_confirmation":
+                    dishes_needing_recipes = [
+                        rs
+                        for rs in session.event_data.recipe_sources
+                        if rs.source_type == RecipeSourceType.AI_DEFAULT
+                        and rs.extracted_ingredients is None
+                    ]
+                    if dishes_needing_recipes:
+                        results = await asyncio.gather(
+                            *[
+                                ai_service.generate_default_recipe(rs.dish_name)
+                                for rs in dishes_needing_recipes
+                            ]
+                        )
+                        newly_generated = []
+                        for rs, ingredients in zip(dishes_needing_recipes, results):
+                            rs.extracted_ingredients = [i.model_dump() for i in ingredients]
+                            newly_generated.append(
+                                {
+                                    "dish": rs.dish_name,
+                                    "ingredients": rs.extracted_ingredients,
+                                }
+                            )
+                        session.event_data.last_generated_recipes = newly_generated
 
                 # If we just transitioned to agent_running, hand off to the agent
                 if session.event_data.conversation_stage == "agent_running":
                     from app.agent.runner import run_agent
+                    from app.models.event import OutputFormat
+                    from app.services.tasks_service import TasksService
+
+                    tasks_service = None
+                    if session.google_credentials and OutputFormat.GOOGLE_TASKS in session.event_data.output_formats:
+                        tasks_service = TasksService.from_token_dict(session.google_credentials)
 
                     session.agent_state = await run_agent(
                         websocket,
@@ -385,6 +495,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         session.event_data.output_formats,
                         ai_service,
                         existing_state=session.agent_state,
+                        tasks_service=tasks_service,
                     )
                     continue
 
@@ -475,13 +586,10 @@ async def extract_recipe_from_url(session_id: str, body: dict):
         )
         return {"dish_name": dish_name, "ingredients": [], "success": False, "message": detail}
 
-    # Update the recipe source for this dish
-    for rs in session.event_data.recipe_sources:
-        if rs.dish_name.lower() == dish_name.lower():
-            rs.source_type = RecipeSourceType.USER_URL
-            rs.url = url
-            rs.extracted_ingredients = [i.model_dump() for i in ingredients]
-            break
+    rs_to_update = _find_or_create_recipe_source(session.event_data, dish_name)
+    rs_to_update.source_type = RecipeSourceType.USER_URL
+    rs_to_update.url = url
+    rs_to_update.extracted_ingredients = [i.model_dump() for i in ingredients]
 
     return {
         "dish_name": dish_name,
@@ -520,13 +628,10 @@ async def upload_recipe(
     content = await file.read()
     ingredients = await ai_service.extract_recipe_from_file(content, file.content_type)
 
-    # Update the recipe source and resolve any gathering-stage promise for this dish
-    for rs in session.event_data.recipe_sources:
-        if rs.dish_name.lower() == dish_name.lower():
-            rs.source_type = RecipeSourceType.USER_UPLOAD
-            rs.extracted_ingredients = [i.model_dump() for i in ingredients]
-            rs.confirmed = True
-            break
+    rs_to_update = _find_or_create_recipe_source(session.event_data, dish_name)
+    rs_to_update.source_type = RecipeSourceType.USER_UPLOAD
+    rs_to_update.extracted_ingredients = [i.model_dump() for i in ingredients]
+    rs_to_update.confirmed = True
 
     session.event_data.recipe_promises = [
         p for p in session.event_data.recipe_promises if p.lower() != dish_name.lower()
@@ -536,6 +641,74 @@ async def upload_recipe(
         "dish_name": dish_name,
         "ingredients": [i.model_dump() for i in ingredients],
     }
+
+
+# ============================================================================
+# Google OAuth Endpoints
+# ============================================================================
+
+
+@app.get("/api/auth/google/start")
+async def google_auth_start(session_id: str):
+    """
+    Generate a Google OAuth authorization URL for the given session.
+    The frontend opens this URL in a popup to begin the OAuth flow.
+    Returns 503 if OAuth credentials are not configured.
+    """
+    if not _OAUTH_CLIENT_ID or not _OAUTH_CLIENT_SECRET:
+        raise HTTPException(
+            status_code=503,
+            detail="Google OAuth is not configured. Set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET.",
+        )
+
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    flow = _build_oauth_flow()
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        state=session_id,
+        prompt="consent",
+    )
+    return {"auth_url": auth_url}
+
+
+@app.get("/api/auth/google/callback", response_class=HTMLResponse)
+async def google_auth_callback(code: str, state: str):
+    """
+    OAuth callback — exchanges the authorization code for tokens and stores
+    them on the session identified by the `state` parameter (session_id).
+    Returns an HTML page that closes the popup window.
+    """
+    session = session_manager.get_session(state)
+    if not session:
+        return HTMLResponse("<script>window.close();</script>", status_code=400)
+
+    try:
+        flow = _build_oauth_flow()
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        session.google_credentials = {
+            "token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "token_uri": creds.token_uri,
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "scopes": list(creds.scopes) if creds.scopes else [GOOGLE_TASKS_SCOPE],
+        }
+        logger.info("Google OAuth complete for session %s", state)
+    except Exception as exc:
+        logger.error("Google OAuth callback failed: %s", exc)
+        return HTMLResponse(
+            "<script>window.opener?.postMessage('google_auth_error','*');window.close();</script>",
+            status_code=200,
+        )
+
+    return HTMLResponse(
+        "<script>window.opener?.postMessage('google_auth_complete','*');window.close();</script>"
+    )
 
 
 # ============================================================================

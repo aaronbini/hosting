@@ -8,7 +8,7 @@ type WebSocketMessage =
   | { type: 'error'; data: { error: string } }
   | { type: 'agent_progress'; stage: string; message: string }
   | { type: 'agent_review'; stage: string; message: string; shopping_list?: unknown }
-  | { type: 'agent_complete'; stage: string; formatted_output?: string; google_sheet_url?: string | null; google_keep_url?: string | null }
+  | { type: 'agent_complete'; stage: string; formatted_output?: string; google_sheet_url?: string | null; google_tasks_url?: string | null }
   | { type: 'agent_error'; stage: string; message: string }
 
 interface UseChatReturn {
@@ -124,7 +124,7 @@ export const useChat = (sessionId: string): UseChatReturn => {
         } else if (data.type === 'agent_complete') {
           const extraLinks: string[] = []
           if (data.google_sheet_url) extraLinks.push(`Google Sheet: ${data.google_sheet_url}`)
-          if (data.google_keep_url) extraLinks.push(`Google Keep: ${data.google_keep_url}`)
+          if (data.google_tasks_url) extraLinks.push(`Google Tasks: ${data.google_tasks_url}`)
           const content = [data.formatted_output || 'Your results are ready.', ...extraLinks]
             .filter(Boolean)
             .join('\n\n')
