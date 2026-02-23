@@ -29,9 +29,8 @@ export default function ChatInterface({ sessionId }: Props) {
   const connectionAttempted = useRef(false)
   const [isGoogleConnected, setIsGoogleConnected] = useState(false)
 
-  const needsGoogleAuth =
-    eventData?.conversation_stage === 'selecting_output' &&
-    eventData.output_formats?.includes('google_tasks') &&
+  const needsGoogleAuth = 
+    eventData?.output_formats?.includes('google_tasks') &&
     !isGoogleConnected
 
   const handleConnectGoogle = useCallback(async () => {
@@ -45,10 +44,12 @@ export default function ChatInterface({ sessionId }: Props) {
         setIsGoogleConnected(true)
         window.removeEventListener('message', onMessage)
         popup?.close()
+        // Re-trigger the agent now that credentials are set
+        sendMessage("I've connected my Google account.")
       }
     }
     window.addEventListener('message', onMessage)
-  }, [sessionId])
+  }, [sessionId, sendMessage])
 
   useEffect(() => {
     if (connectionAttempted.current) return
@@ -124,8 +125,7 @@ export default function ChatInterface({ sessionId }: Props) {
             </button>
           </div>
         )}
-        {eventData?.conversation_stage === 'selecting_output' &&
-          eventData.output_formats?.includes('google_tasks') &&
+        {eventData?.output_formats?.includes('google_tasks') &&
           isGoogleConnected && (
           <div className="border-t border-slate-200 bg-green-50 px-4 py-3">
             <p className="text-sm text-green-700">✓ Google account connected</p>

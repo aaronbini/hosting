@@ -9,7 +9,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
-from app.models.event import EventPlanningData, ExtractionResult, Recipe
+from app.models.event import DietaryRestriction, EventPlanningData, ExtractionResult, Recipe
 from app.models.shopping import (
     AggregatedIngredient,
     DishCategory,
@@ -224,7 +224,7 @@ class GeminiService:
                               Format each dish like this (use a bullet list for ingredients).
                               List ingredient NAMES ONLY — no quantities or amounts:
 
-                              "Here's the recipe I'll use for each dish — let me know if anything looks off:
+                              "Here's the ingredient list I'm planning to use for each dish:
 
                               **[Dish Name]**
                               • ingredient name
@@ -234,14 +234,20 @@ class GeminiService:
                               **[Next Dish]**
                               • …
 
-                              Happy with these, or would you like to change any dish? You can also swap in your
-                              own recipe by pasting a URL, uploading a file, or describing the ingredients."
+                              Does this look right, or would you like to swap in your own recipe for any of these?
+                              You can paste a URL, upload a file, or describe the ingredients.
+
+                              Also, would you like the full recipe (with step-by-step instructions) for any of
+                              these dishes? Just let me know which ones and I'll walk you through them."
 
                               ON SUBSEQUENT TURNS (no last_generated_recipes):
                               The user is reviewing or correcting dishes. Handle their feedback:
                               - If they confirm everything: acknowledge and move on.
                               - If they want to change a dish: acknowledge the change and confirm the new approach.
                               - If they want to provide their own recipe: guide them (URL, upload, description).
+                              - If they ask for a full recipe for any dish: provide a complete recipe including
+                                serving size, ingredients with quantities, and numbered step-by-step instructions.
+                                Scale the recipe to serve the number of guests in the event data.
 
                               For dishes where the user has their own recipe:
                               - They can paste a URL to an online recipe (ask them to paste the URL directly in chat)
@@ -765,6 +771,7 @@ class GeminiService:
         self,
         spec: DishServingSpec,
         recipe: Optional["Recipe"] = None,
+        dietary_restrictions: list[DietaryRestriction] = [],
     ) -> DishIngredients:
         """
         Given a DishServingSpec (dish name + serving counts), return a
@@ -793,6 +800,15 @@ class GeminiService:
         serving_hint = CATEGORY_SERVING_HINTS.get(spec.dish_category, "")
         serving_hint_line = f"- Serving size reference: {serving_hint}" if serving_hint else ""
 
+        dietary_note = ""
+        if dietary_restrictions:
+            lines = [f"  - {r.count} guest(s): {r.type}" for r in dietary_restrictions]
+            dietary_note = (
+                "DIETARY RESTRICTIONS (strict — do NOT include any violating ingredients):\n"
+                + "\n".join(lines)
+                + "\n"
+            )
+
         # Special handling for beverages - they should just list the beverage, not a recipe
         is_beverage = spec.dish_category in (
             DishCategory.BEVERAGE_ALCOHOLIC,
@@ -811,7 +827,7 @@ class GeminiService:
                     CRITICAL: This is a BEVERAGE, not a food dish. Return ONLY the beverage itself as the ingredient.
                     Do NOT create a recipe or list ingredients for a sauce/dish that uses this beverage.
 
-                    Rules for beverages:
+                    {dietary_note}Rules for beverages:
                     - For wine: list "wine" (red/white/rosé as appropriate) in bottles
                     - For beer: list "beer" in cans or bottles
                     - For cocktails: list the spirits and mixers needed
@@ -829,7 +845,7 @@ class GeminiService:
                     Child servings: {spec.child_servings}
                     Total servings: {spec.total_servings}
                     {recipe_context}
-                    Rules:
+                    {dietary_note}Rules:
                     - Scale the recipe exactly to the above serving counts.
                     {serving_hint_line}
                     - Child servings are ~60% of an adult serving for food items.

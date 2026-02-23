@@ -81,7 +81,7 @@ class DishIngredients(BaseModel):
     """All ingredients required to make a specific dish at a specific serving count."""
 
     dish_name: str
-    serving_spec: DishServingSpec
+    serving_spec: Optional[DishServingSpec] = None
     ingredients: List[RecipeIngredient]
 
 

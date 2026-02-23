@@ -270,11 +270,81 @@ class TestCompletionScoring:
         data.compute_derived_fields()
         assert data.completion_score == 0.0
 
-    def test_completion_score_one_when_all_critical_answered(self):
+    def test_completion_score_35_when_only_non_meal_questions_answered(self):
+        """Non-meal questions = 35% of score; meal plan = 0% when no recipes."""
+        data = EventPlanningData()
+        for qid in ["event_type", "guest_count", "guest_breakdown", "dietary", "cuisine"]:
+            data.answered_questions[qid] = True
+        data.compute_derived_fields()
+        assert data.completion_score == pytest.approx(0.35)
+
+    def test_completion_score_one_when_all_questions_and_complete_meal_plan(self):
+        """Full score requires all non-meal questions + fully complete recipes."""
         data = EventPlanningData()
         self._all_answered(data)
+        data.meal_plan.add_recipe(_complete_recipe())
         data.compute_derived_fields()
-        assert data.completion_score == 1.0
+        assert data.completion_score == pytest.approx(1.0)
+
+    def test_completion_score_food_weighted_higher_than_drink(self):
+        """When food is complete and drink is incomplete, score > when drink is complete and food is incomplete."""
+        from app.models.event import RecipeType
+
+        complete_food = Recipe(
+            name="Roast Chicken",
+            status=RecipeStatus.COMPLETE,
+            recipe_type=RecipeType.FOOD,
+            ingredients=[{"name": "chicken", "quantity": 1, "unit": "whole", "grocery_category": "meat"}],
+        )
+        incomplete_food = Recipe(
+            name="Side Salad",
+            status=RecipeStatus.PLACEHOLDER,
+            recipe_type=RecipeType.FOOD,
+            ingredients=[],
+        )
+        complete_drink = Recipe(
+            name="Wine",
+            status=RecipeStatus.NAMED,
+            recipe_type=RecipeType.DRINK,
+            preparation_method=PreparationMethod.STORE_BOUGHT,
+        )
+        incomplete_drink = Recipe(
+            name="cocktail",
+            status=RecipeStatus.PLACEHOLDER,
+            recipe_type=RecipeType.DRINK,
+            ingredients=[],
+        )
+
+        # food complete + drink incomplete vs. drink complete + food incomplete
+        data_food_done = EventPlanningData()
+        data_food_done.meal_plan.add_recipe(complete_food)
+        data_food_done.meal_plan.add_recipe(incomplete_drink)
+        data_food_done.compute_derived_fields()
+
+        data_drink_done = EventPlanningData()
+        data_drink_done.meal_plan.add_recipe(incomplete_food)
+        data_drink_done.meal_plan.add_recipe(complete_drink)
+        data_drink_done.compute_derived_fields()
+
+        # food(weight=1) done wins over drink(weight=0.5) done
+        assert data_food_done.completion_score > data_drink_done.completion_score
+
+    def test_completion_score_name_partial_ingredients_full(self):
+        """A named recipe with no ingredients gets 20% of its item weight."""
+        from app.models.event import RecipeType
+
+        named_no_ingredients = Recipe(
+            name="Mystery Dish",
+            status=RecipeStatus.NAMED,
+            recipe_type=RecipeType.FOOD,
+            ingredients=[],
+        )
+        data = EventPlanningData()
+        data.meal_plan.add_recipe(named_no_ingredients)
+        data.compute_derived_fields()
+        # non_meal_score=0, meal_plan_score = 0.2*1 + 0.8*0 = 0.2
+        # completion_score = 0.35*0 + 0.65*0.2 = 0.13
+        assert data.completion_score == pytest.approx(0.13)
 
 
 # ---------------------------------------------------------------------------

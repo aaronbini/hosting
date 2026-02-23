@@ -246,7 +246,7 @@ async def run_agent(
                 "stage": AgentStage.COMPLETE,
                 "formatted_output": state.formatted_chat_output,
                 "google_sheet_url": state.google_sheet_url,
-                "google_tasks_url": state.google_tasks_url,
+                "google_tasks": state.google_tasks.model_dump() if state.google_tasks else None,
             },
         )
 

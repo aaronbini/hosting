@@ -294,34 +294,47 @@ class EventPlanningData(BaseModel):
 
     def _compute_completion_score(self):
         """
-        Granular completion scoring based on question categories.
+        Completion scoring:
+        - 35% from non-meal critical questions (event_type, guest_count, guest_breakdown, dietary, cuisine)
+        - 65% from meal plan items, food weighted 2x over drinks
 
-        Questions are organized by importance:
-        - Critical (100% of score): Must have for basic recommendations
-        - Optional (0% of score): Nice to have
+        Per meal item: name = 20%, ingredients = 80%.
+        Store-bought items get full ingredient score automatically (no ingredients needed).
 
-        Completion threshold:
-        - is_complete = True when ALL critical questions answered AND meal plan is confirmed
+        is_complete requires all 6 critical questions + confirmed meal plan + no pending recipes.
         """
-        # Count answered questions by category
-        critical_answered = sum(
-            1
-            for q in CONVERSATION_QUESTIONS["critical"]
-            if self.answered_questions.get(q["id"], False)
+        NON_MEAL_QUESTION_IDS = {"event_type", "guest_count", "guest_breakdown", "dietary", "cuisine"}
+        non_meal_answered = sum(
+            1 for qid in NON_MEAL_QUESTION_IDS if self.answered_questions.get(qid, False)
         )
-        critical_total = len(CONVERSATION_QUESTIONS["critical"])
+        non_meal_score = non_meal_answered / len(NON_MEAL_QUESTION_IDS)
 
-        # Calculate weighted scores
-        critical_score = (critical_answered / critical_total * 1.0) if critical_total > 0 else 0.0
+        # Meal plan score: each recipe weighted by type (food=1.0, drink=0.5)
+        recipes = self.meal_plan.recipes
+        meal_plan_score = 0.0
+        if recipes:
+            total_weight = 0.0
+            weighted_sum = 0.0
+            for recipe in recipes:
+                item_weight = 1.0 if recipe.recipe_type == RecipeType.FOOD else 0.5
+                name_score = 0.0 if recipe.status == RecipeStatus.PLACEHOLDER else 1.0
+                if recipe.preparation_method == PreparationMethod.STORE_BOUGHT:
+                    ingredient_score = 1.0
+                else:
+                    ingredient_score = 1.0 if len(recipe.ingredients) > 0 else 0.0
+                item_score = 0.2 * name_score + 0.8 * ingredient_score
+                total_weight += item_weight
+                weighted_sum += item_weight * item_score
+            meal_plan_score = weighted_sum / total_weight
 
-        self.completion_score = critical_score
+        self.completion_score = 0.35 * non_meal_score + 0.65 * meal_plan_score
 
-        # Ready for next stage when:
-        # 1. ALL critical questions answered, AND
-        # 2. Meal plan is confirmed with recipes, AND
-        # 3. No pending user recipes
-        all_critical_answered = critical_answered == critical_total
-        has_recipes = len(self.meal_plan.recipes) > 0
+        # is_complete: all 6 critical questions + confirmed meal plan + no pending recipes
+        all_critical_answered = all(
+            self.answered_questions.get(q["id"], False)
+            for q in CONVERSATION_QUESTIONS["critical"]
+        )
+        has_recipes = len(recipes) > 0
         has_unresolved_recipes = len(self.meal_plan.pending_user_recipes) > 0
 
         self.is_complete = (
@@ -331,15 +344,16 @@ class EventPlanningData(BaseModel):
             and not has_unresolved_recipes
         )
 
-        # Store detailed progress for UI
         self.progress = {
             "overall_score": round(self.completion_score, 2),
-            "critical": {
-                "answered": critical_answered,
-                "total": critical_total,
-                "percentage": round(
-                    (critical_answered / critical_total * 100) if critical_total > 0 else 0, 1
-                ),
+            "non_meal": {
+                "answered": non_meal_answered,
+                "total": len(NON_MEAL_QUESTION_IDS),
+                "percentage": round(non_meal_score * 100, 1),
+            },
+            "meal_plan": {
+                "score": round(meal_plan_score, 2),
+                "recipe_count": len(recipes),
             },
             "is_complete": self.is_complete,
         }

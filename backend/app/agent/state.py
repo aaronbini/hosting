@@ -35,6 +35,11 @@ class AgentStage(str):
     ERROR = "error"
 
 
+class GoogleTasksResult(BaseModel):
+    url: str
+    list_title: str
+
+
 class AgentState(BaseModel):
     """
     Single state object passed between all agent steps.
@@ -74,5 +79,5 @@ class AgentState(BaseModel):
 
     # --- Step 7 outputs ---
     google_sheet_url: Optional[str] = None
-    google_tasks_url: Optional[str] = None
+    google_tasks: Optional[GoogleTasksResult] = None
     formatted_chat_output: Optional[str] = None

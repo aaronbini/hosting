@@ -13,11 +13,12 @@ maps directly to a LangGraph node that receives/returns state updates.
 """
 
 import asyncio
+import datetime
 import logging
 import math
 from typing import TYPE_CHECKING
 
-from app.agent.state import AgentStage, AgentState
+from app.agent.state import AgentStage, AgentState, GoogleTasksResult
 from app.models.shopping import DishCategory
 from app.services.quantity_engine import calculate_all_serving_specs
 
@@ -108,6 +109,7 @@ async def get_all_dish_ingredients(
         ai_service.get_dish_ingredients(
             spec,
             recipe=recipe_map.get(spec.dish_name.lower()),
+            dietary_restrictions=state.event_data.dietary_restrictions,
         )
         for spec in state.serving_specs
     ]
@@ -230,10 +232,15 @@ async def create_google_tasks(state: AgentState, tasks_service=None) -> AgentSta
         state.google_tasks_url = None
         return state
 
-    title = f"Dinner Party Shopping - {state.event_data.event_date or 'Today'}"
-    list_id = await tasks_service.create_shopping_list(state.shopping_list, title)
-    state.google_tasks_url = f"https://tasks.google.com/tasks/lists/{list_id}"
-    logger.info("[STEP 5b] create_google_tasks: task list created — %s", state.google_tasks_url)
+    raw_date = state.event_data.event_date or datetime.date.today().isoformat()
+    try:
+        event_date = datetime.date.fromisoformat(raw_date).strftime("%m-%d-%Y")
+    except ValueError:
+        event_date = raw_date
+    title = f"Dinner Party Shopping - {event_date}"
+    await tasks_service.create_shopping_list(state.shopping_list, title)
+    state.google_tasks = GoogleTasksResult(url="https://tasks.google.com", list_title=title)
+    logger.info("[STEP 5b] create_google_tasks: task list %r created", title)
     return state
 
 

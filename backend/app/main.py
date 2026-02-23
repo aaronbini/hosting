@@ -21,8 +21,8 @@ from app.models.event import (
 from app.services.ai_service import GeminiService
 from app.services.session_manager import SessionData, session_manager
 
-# Load environment variables
-load_dotenv()
+# Load environment variables (override=True ensures .env wins over any shell env vars)
+load_dotenv(override=True)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -457,6 +457,26 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     from app.agent.runner import run_agent
                     from app.models.event import OutputFormat
                     from app.services.tasks_service import TasksService
+
+                    # If Google Tasks was selected but the user hasn't connected yet,
+                    # notify the frontend (so it shows the OAuth button) and wait.
+                    needs_google_auth = (
+                        _OAUTH_CLIENT_ID
+                        and _OAUTH_CLIENT_SECRET
+                        and OutputFormat.GOOGLE_TASKS in session.event_data.output_formats
+                        and not session.google_credentials
+                    )
+                    if needs_google_auth:
+                        await websocket.send_json({
+                            "type": "stream_start",
+                            "data": {
+                                "completion_score": session.event_data.completion_score,
+                                "is_complete": session.event_data.is_complete,
+                                "event_data": session.event_data.model_dump(),
+                            },
+                        })
+                        await websocket.send_json({"type": "stream_end"})
+                        continue
 
                     tasks_service = None
                     if _OAUTH_CLIENT_ID and _OAUTH_CLIENT_SECRET and OutputFormat.GOOGLE_TASKS in session.event_data.output_formats:
