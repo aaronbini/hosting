@@ -519,6 +519,17 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
             # Receive message from client
             data = await websocket.receive_json()
 
+            # Reload session from DB each turn to pick up the latest committed state
+            async with async_session_factory() as reload_db:
+                fresh_row = await db_session_manager.get_session_row(session_id, reload_db)
+                if fresh_row is not None:
+                    _agent_state = session.agent_state
+                    _google_creds = session.google_credentials
+                    session = db_session_manager._row_to_session_data(fresh_row)
+                    session.agent_state = _agent_state
+                    if not session.google_credentials:
+                        session.google_credentials = _google_creds
+
             msg_type = data.get("type")
             msg_data = data.get("data")
 
