@@ -137,9 +137,6 @@ Frontend:
 
 Features:
   □ Google Sheets integration
-  □ Food quantity calculations
-  □ Timeline/prep schedule generation
-  □ Budget breakdown analysis
 
 
 🛠️ TECHNOLOGY STACK

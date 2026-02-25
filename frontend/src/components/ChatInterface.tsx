@@ -4,12 +4,25 @@ import ChatMessages from './ChatMessages'
 import ChatInput from './ChatInput'
 import EventDataPanel from './EventDataPanel'
 import RecipeUploadPanel from './RecipeUploadPanel'
+import type { EventData, Message } from '../types'
 
 interface Props {
   sessionId: string
+  initialMessages?: Message[]
+  initialEventData?: EventData | null
+  initialCompletionScore?: number
+  initialIsComplete?: boolean
+  onNewSession: () => void
 }
 
-export default function ChatInterface({ sessionId }: Props) {
+export default function ChatInterface({
+  sessionId,
+  initialMessages,
+  initialEventData,
+  initialCompletionScore,
+  initialIsComplete,
+  onNewSession,
+}: Props) {
   const {
     messages,
     isLoading,
@@ -18,12 +31,15 @@ export default function ChatInterface({ sessionId }: Props) {
     completionScore,
     isComplete,
     isAwaitingReview,
+    excludedItems,
+    toggleExcludedItem,
     connect,
     sendMessage,
     sendMessageRest,
     approveShoppingList,
+    selectOutputs,
     isConnected
-  } = useChat(sessionId)
+  } = useChat(sessionId, { initialMessages, initialEventData, initialCompletionScore, initialIsComplete })
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const connectionAttempted = useRef(false)
@@ -70,17 +86,27 @@ export default function ChatInterface({ sessionId }: Props) {
   }
 
   return (
-    <div className="flex h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
+    <div className="flex flex-1 overflow-hidden">
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col max-w-4xl mx-auto w-full">
         {/* Header */}
         <div className="bg-white border-b border-slate-200 p-6 shadow-sm">
-          <h1 className="text-3xl font-bold text-slate-900">
-            Food Event Planner
-          </h1>
-          <p className="text-slate-600 mt-2">
-            Let's plan your perfect event together
-          </p>
+          <div className="flex items-start justify-between">
+            <div>
+              <h1 className="text-3xl font-bold text-slate-900">
+                Food Event Planner
+              </h1>
+              <p className="text-slate-600 mt-2">
+                Let's plan your perfect event together
+              </p>
+            </div>
+            <button
+              onClick={onNewSession}
+              className="px-4 py-2 text-sm font-medium rounded border border-slate-300 text-slate-600 hover:bg-slate-50 transition-colors shrink-0 mt-1"
+            >
+              New Event
+            </button>
+          </div>
           {error && (
             <div className="mt-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded">
               {error}
@@ -93,6 +119,9 @@ export default function ChatInterface({ sessionId }: Props) {
           messages={messages}
           isLoading={isLoading}
           messagesEndRef={messagesEndRef}
+          excludedItems={excludedItems}
+          onToggleExcluded={toggleExcludedItem}
+          onSelectOutputs={selectOutputs}
         />
 
         {/* Recipe upload — visible only while there are recipes awaiting user input */}
@@ -136,13 +165,15 @@ export default function ChatInterface({ sessionId }: Props) {
         {isAwaitingReview && (
           <div className="border-t border-slate-200 bg-green-50 px-4 py-3 flex items-center gap-3">
             <p className="text-sm text-slate-600 flex-1">
-              Looks good? Approve the list to continue, or type corrections below.
+              {excludedItems.size > 0
+                ? `Removing ${excludedItems.size} item${excludedItems.size > 1 ? 's' : ''} you already have.`
+                : 'Check off anything you already have, then approve to continue.'}
             </p>
             <button
               onClick={approveShoppingList}
-              className="px-5 py-2 text-sm font-medium rounded bg-green-600 text-white hover:bg-green-700 transition-colors"
+              className="px-5 py-2 text-sm font-medium rounded bg-green-600 text-white hover:bg-green-700 transition-colors shrink-0"
             >
-              Approve
+              {excludedItems.size > 0 ? 'Approve with edits' : 'Approve'}
             </button>
           </div>
         )}

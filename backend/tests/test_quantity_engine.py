@@ -16,27 +16,27 @@ from app.services.quantity_engine import (
 class TestCalculateDishServingSpec:
     def test_main_protein_adults_only(self):
         spec = calculate_dish_serving_spec("Beef Ragu", DishCategory.MAIN_PROTEIN, 8, 0)
-        assert spec.adult_servings == 10.0  # 8 * 1.25
+        assert spec.adult_servings == 8.0   # 8 * 1.0
         assert spec.child_servings == 0.0
-        assert spec.total_servings == 10.0
+        assert spec.total_servings == 8.0
 
     def test_main_protein_mixed_guests(self):
         spec = calculate_dish_serving_spec("Beef Ragu", DishCategory.MAIN_PROTEIN, 8, 2)
-        assert spec.adult_servings == 10.0   # 8 * 1.25
+        assert spec.adult_servings == 8.0    # 8 * 1.0
         assert spec.child_servings == 1.5    # 2 * 0.75
-        assert spec.total_servings == 11.5
+        assert spec.total_servings == 9.5
 
     def test_alcoholic_beverage_children_get_zero(self):
         spec = calculate_dish_serving_spec("Wine", DishCategory.BEVERAGE_ALCOHOLIC, 8, 4)
         assert spec.child_servings == 0.0    # no alcohol for children
-        assert spec.adult_servings == 20.0   # 8 * 2.5
+        assert spec.adult_servings == 12.0   # 8 * 1.5
 
     def test_nonalcoholic_beverage_children_same_multiplier_as_adults(self):
         spec = calculate_dish_serving_spec(
             "Sparkling Water", DishCategory.BEVERAGE_NONALCOHOLIC, 4, 4
         )
-        assert spec.adult_servings == 12.0   # 4 * 3.0
-        assert spec.child_servings == 12.0   # 4 * 3.0
+        assert spec.adult_servings == 6.0    # 4 * 1.5
+        assert spec.child_servings == 4.0    # 4 * 1.0
 
     def test_dish_name_and_category_preserved(self):
         spec = calculate_dish_serving_spec("My Pasta", DishCategory.STARCH_SIDE, 4, 0)
@@ -56,12 +56,12 @@ class TestCalculateDishServingSpec:
 
     def test_bread_adult_servings(self):
         spec = calculate_dish_serving_spec("Focaccia", DishCategory.BREAD, 8, 0)
-        assert spec.adult_servings == 12.0   # 8 * 1.5
+        assert spec.adult_servings == 8.0   # 8 * 1.0
 
     def test_passed_appetizer_high_multiplier(self):
-        # 3 pieces per adult
+        # 2 pieces per adult
         spec = calculate_dish_serving_spec("Bruschetta", DishCategory.PASSED_APPETIZER, 10, 0)
-        assert spec.adult_servings == 30.0   # 10 * 3.0
+        assert spec.adult_servings == 20.0   # 10 * 2.0
 
     @pytest.mark.parametrize(
         "category",

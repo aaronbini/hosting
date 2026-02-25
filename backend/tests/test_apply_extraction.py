@@ -258,6 +258,18 @@ class TestStageTransitions:
         apply_extraction(session, extraction)
         assert session.event_data.conversation_stage == "selecting_output"
 
+    def test_output_formats_in_recipe_confirmation_do_not_skip_selecting_output(self):
+        """Regression: AI extracting output_formats during recipe_confirmation must not
+        bypass the selecting_output stage and jump straight to agent_running."""
+        session = make_session("recipe_confirmation")
+        session.event_data.meal_plan.add_recipe(_complete_recipe())
+        session.event_data.meal_plan.confirmed = True
+        # AI incorrectly extracts output_formats alongside meal_plan_confirmed=True
+        extraction = ExtractionResult(output_formats=["in_chat"])
+        apply_extraction(session, extraction)
+        assert session.event_data.conversation_stage == "selecting_output"
+        assert session.event_data.output_formats == []
+
     def test_invalid_output_format_ignored(self):
         session = make_session("selecting_output")
         extraction = ExtractionResult(output_formats=["not_a_real_format"])

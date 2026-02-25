@@ -1,14 +1,22 @@
-import asyncio
+from __future__ import annotations
+
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, status
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.google_login import build_login_flow, is_login_configured
+from app.auth.jwt import create_access_token, decode_access_token_raw, get_current_user
+from app.db.database import async_session_factory, engine, get_db
+from app.db.models import User
 from app.models.chat import ChatRequest, ChatResponse, MessageRole
 from app.models.event import (
     ExtractionResult,
@@ -19,17 +27,20 @@ from app.models.event import (
     RecipeType,
 )
 from app.services.ai_service import GeminiService
-from app.services.session_manager import SessionData, session_manager
+from app.services.db_session_manager import db_session_manager
+from app.services.plan_manager import plan_manager
+from app.services.session_manager import SessionData
 
 # Load environment variables (override=True ensures .env wins over any shell env vars)
 load_dotenv(override=True)
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5174")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize services
-# TODO: Make this configurable/injectable for testing
 try:
     ai_service = GeminiService()
 except ValueError as e:
@@ -43,7 +54,7 @@ async def lifespan(app: FastAPI):
     logger.info("Application starting up")
     yield
     logger.info("Application shutting down")
-    # TODO: Cleanup persistent storage connections here
+    await engine.dispose()
 
 
 # Create FastAPI app
@@ -54,10 +65,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Add CORS middleware
+# Add CORS middleware — explicit origins required when credentials: 'include' is used
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: Configure for production
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -65,7 +76,7 @@ app.add_middleware(
 
 
 # ============================================================================
-# Google OAuth constants (used by helpers and endpoints below)
+# Google OAuth constants — Tasks OAuth (popup, offline, tasks scope)
 # ============================================================================
 
 GOOGLE_TASKS_SCOPE = "https://www.googleapis.com/auth/tasks"
@@ -81,7 +92,7 @@ _OAUTH_REDIRECT_URI = os.getenv(
 
 
 def _build_oauth_flow():
-    """Build a Google OAuth Flow from environment config."""
+    """Build a Google OAuth Flow for the Tasks permission (existing flow)."""
     from google_auth_oauthlib.flow import Flow
 
     return Flow.from_client_config(
@@ -164,13 +175,23 @@ def apply_extraction(session: SessionData, extraction: ExtractionResult) -> None
             event_data.answered_questions[question_id] = True
 
     # 4. Handle meal_plan_confirmed
+    # If any recipes were added or removed this turn, reset confirmation — the user
+    # needs to see and approve the updated ingredient list before we can proceed.
+    if extraction.recipe_updates:
+        if any(u.action in ("add", "remove") for u in extraction.recipe_updates):
+            event_data.meal_plan.confirmed = False
+            event_data.answered_questions["meal_plan"] = False
+
     if extraction.meal_plan_confirmed:
         event_data.meal_plan.confirmed = True
         if len(event_data.meal_plan.recipes) > 0:
             event_data.answered_questions["meal_plan"] = True
 
-    # 5. Output format selection
-    if extraction.output_formats:
+    # 5. Output format selection — only honoured once the user is actually choosing
+    # an output format. Ignoring it in earlier stages prevents the AI from
+    # accidentally extracting output_formats during recipe_confirmation and
+    # short-circuiting the selecting_output stage entirely.
+    if extraction.output_formats and event_data.conversation_stage == "selecting_output":
         event_data.output_formats = [
             OutputFormat(f) for f in extraction.output_formats if f in [e.value for e in OutputFormat]
         ]
@@ -184,14 +205,51 @@ def apply_extraction(session: SessionData, extraction: ExtractionResult) -> None
     elif event_data.conversation_stage == "recipe_confirmation":
         if event_data.meal_plan.is_complete:
             event_data.conversation_stage = "selecting_output"
-
     elif event_data.conversation_stage == "selecting_output":
         if len(event_data.output_formats) > 0:
             event_data.conversation_stage = "agent_running"
 
 
 # ============================================================================
-# REST Endpoints
+# Auth helpers
+# ============================================================================
+
+
+async def _upsert_user(db: AsyncSession, google_id: str, email: str, name: str, picture: Optional[str]) -> User:
+    """Insert or update a User row based on google_id."""
+    from sqlalchemy import select
+
+    result = await db.execute(select(User).where(User.google_id == google_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        user = User(google_id=google_id, email=email, name=name, picture=picture)
+        db.add(user)
+    else:
+        user.email = email
+        user.name = name
+        user.picture = picture
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+async def _require_session_owner(
+    session_id: str,
+    current_user: User,
+    db: AsyncSession,
+) -> SessionData:
+    """Fetch a session and verify ownership. Returns SessionData or raises HTTP 403/404."""
+    row = await db_session_manager.get_session_row(session_id, db)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if row.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    session = db_session_manager._row_to_session_data(row)
+    return session
+
+
+# ============================================================================
+# REST Endpoints — Health
 # ============================================================================
 
 
@@ -204,40 +262,159 @@ async def health_check():
     }
 
 
+# ============================================================================
+# Login OAuth Endpoints
+# ============================================================================
+
+
+@app.get("/api/auth/login")
+async def login():
+    """Redirect the browser to Google's OAuth consent page for login."""
+    if not is_login_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Google login OAuth is not configured.",
+        )
+    flow = build_login_flow()
+    auth_url, state = flow.authorization_url(access_type="online", prompt="select_account")
+    response = RedirectResponse(url=auth_url, status_code=302)
+    # Store state in a short-lived httpOnly cookie for CSRF verification on callback
+    response.set_cookie("login_state", state, httponly=True, max_age=600, samesite="lax")
+    return response
+
+
+@app.get("/api/auth/callback")
+async def auth_callback(
+    request: Request,
+    code: str,
+    state: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """OAuth callback — exchange code for tokens, upsert user, set JWT cookie."""
+    stored_state = request.cookies.get("login_state")
+    if not stored_state or stored_state != state:
+        raise HTTPException(status_code=400, detail="Invalid state parameter")
+
+    flow = build_login_flow()
+    try:
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+    except Exception as exc:
+        logger.error("Login OAuth token exchange failed: %s", exc)
+        raise HTTPException(status_code=400, detail="OAuth token exchange failed")
+
+    # Fetch user info from Google
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://www.googleapis.com/oauth2/v3/userinfo",
+                headers={"Authorization": f"Bearer {creds.token}"},
+            )
+            resp.raise_for_status()
+            user_info = resp.json()
+    except Exception as exc:
+        logger.error("Failed to fetch Google user info: %s", exc)
+        raise HTTPException(status_code=502, detail="Failed to retrieve user info from Google")
+
+    google_id = user_info.get("sub")
+    email = user_info.get("email", "")
+    name = user_info.get("name", email)
+    picture = user_info.get("picture")
+
+    if not google_id:
+        raise HTTPException(status_code=502, detail="Google did not return a user ID")
+
+    user = await _upsert_user(db, google_id=google_id, email=email, name=name, picture=picture)
+    token = create_access_token(str(user.id))
+
+    response = RedirectResponse(url=FRONTEND_URL, status_code=302)
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        secure=False,  # Set to True in production with HTTPS
+        samesite="lax",
+        max_age=60 * 60 * 24 * 7,  # 7 days
+    )
+    response.delete_cookie("login_state")
+    return response
+
+
+@app.get("/api/auth/me")
+async def get_me(current_user: User = Depends(get_current_user)):
+    """Return the currently authenticated user's info."""
+    return {
+        "id": str(current_user.id),
+        "email": current_user.email,
+        "name": current_user.name,
+        "picture": current_user.picture,
+    }
+
+
+@app.post("/api/auth/logout")
+async def logout():
+    """Clear the auth cookie."""
+    response = JSONResponse({"ok": True})
+    response.delete_cookie("access_token")
+    return response
+
+
+# ============================================================================
+# Session Endpoints
+# ============================================================================
+
+
 @app.post("/api/sessions")
-async def create_session():
+async def create_session(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Create a new conversation session"""
-    session_id = session_manager.create_session()
+    session_id = await db_session_manager.create_session(current_user.id, db)
     return {
         "session_id": session_id,
         "message": "Session created. Let's start planning your event!",
     }
 
 
-@app.get("/api/sessions/{session_id}")
-async def get_session(session_id: str):
-    """Get session info"""
-    session = session_manager.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+@app.get("/api/sessions")
+async def list_sessions(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all sessions for the current user (lightweight summary, ordered by most recent)."""
+    sessions = await db_session_manager.list_user_sessions_summary(current_user.id, db)
+    return {"sessions": sessions}
 
-    return session.to_dict()
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get full session info including conversation history."""
+    session = await _require_session_owner(session_id, current_user, db)
+    data = session.to_dict()
+    data["conversation_history"] = [
+        {"role": m.role.value, "content": m.content}
+        for m in session.conversation_history
+    ]
+    return data
 
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest) -> ChatResponse:
+async def chat(
+    request: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ChatResponse:
     """REST endpoint for chat (alternative to WebSocket)"""
+    session = await _require_session_owner(request.session_id, current_user, db)
 
-    # Get or create session
-    session = session_manager.get_session(request.session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    # Check AI service
     if not ai_service:
         raise HTTPException(status_code=503, detail="AI service not available")
 
-    # Add user message to history
     session.add_message(MessageRole.USER, request.message)
 
     last_assistant = next(
@@ -253,15 +430,13 @@ async def chat(request: ChatRequest) -> ChatResponse:
     )
     apply_extraction(session, extraction)
 
-    # Generate AI response
     ai_response = await ai_service.generate_response(
         request.message, session.event_data, session.conversation_history
     )
-
-    # Add AI response to history
     session.add_message(MessageRole.ASSISTANT, ai_response)
 
-    # Return response
+    await db_session_manager.save_session(session, db)
+
     return ChatResponse(
         session_id=request.session_id,
         message=ai_response,
@@ -272,16 +447,19 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Delete a session"""
-    if not session_manager.delete_session(session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
-
+    await _require_session_owner(session_id, current_user, db)
+    await db_session_manager.delete_session(session_id, db)
     return {"message": "Session deleted"}
 
 
 # ============================================================================
-# WebSocket Endpoints
+# WebSocket Endpoint
 # ============================================================================
 
 
@@ -307,12 +485,31 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
         }
     }
     """
-
-    # Verify session exists
-    session = session_manager.get_session(session_id)
-    if not session:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Session not found")
+    # --- Auth: validate JWT from cookie ---
+    token = websocket.cookies.get("access_token")
+    if not token:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Not authenticated")
         return
+
+    user_id_str = decode_access_token_raw(token)
+    if not user_id_str:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid token")
+        return
+
+    # --- Load session and verify ownership ---
+    async with async_session_factory() as db:
+        row = await db_session_manager.get_session_row(session_id, db)
+        if row is None:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Session not found")
+            return
+        try:
+            if str(row.user_id) != user_id_str:
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Forbidden")
+                return
+        except Exception:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Forbidden")
+            return
+        session = db_session_manager._row_to_session_data(row)
 
     await websocket.accept()
     logger.info(f"WebSocket connection established for session {session_id}")
@@ -322,144 +519,168 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
             # Receive message from client
             data = await websocket.receive_json()
 
+            # Reload session from DB each turn to pick up the latest committed state
+            async with async_session_factory() as reload_db:
+                fresh_row = await db_session_manager.get_session_row(session_id, reload_db)
+                if fresh_row is not None:
+                    _agent_state = session.agent_state
+                    _google_creds = session.google_credentials
+                    session = db_session_manager._row_to_session_data(fresh_row)
+                    session.agent_state = _agent_state
+                    if not session.google_credentials:
+                        session.google_credentials = _google_creds
+
             msg_type = data.get("type")
             msg_data = data.get("data")
 
-            if msg_type != "message" or not msg_data:
+            if msg_type not in ("message", "select_outputs") or (msg_type == "message" and not msg_data):
                 await websocket.send_json(
                     {"type": "error", "data": {"error": "Invalid message format"}}
                 )
                 continue
 
-            # Check AI service
-            if not ai_service:
+            # Check AI service (only needed for regular messages)
+            if msg_type == "message" and not ai_service:
                 await websocket.send_json(
                     {"type": "error", "data": {"error": "AI service not available"}}
                 )
                 continue
 
             try:
-                # Add user message
-                session.add_message(MessageRole.USER, msg_data)
-                logger.info(
-                    "📨 USER MESSAGE (session=%s, stage=%s): %s",
-                    session_id[:8],
-                    session.event_data.conversation_stage,
-                    msg_data[:100],
-                )
-
-                last_assistant = next(
-                    (
-                        m.content
-                        for m in reversed(session.conversation_history)
-                        if m.role == MessageRole.ASSISTANT
-                    ),
-                    None,
-                )
-                extraction = await ai_service.extract_event_data(
-                    msg_data, session.event_data, last_assistant
-                )
-                logger.info(
-                    "🔄 APPLYING EXTRACTION (stage=%s): %d recipe_updates, meal_plan_confirmed=%s",
-                    session.event_data.conversation_stage,
-                    len(extraction.recipe_updates) if extraction.recipe_updates else 0,
-                    extraction.meal_plan_confirmed,
-                )
-                apply_extraction(session, extraction)
-
-                # Handle URL/description extraction if provided in recipe_updates
-                if extraction.recipe_updates:
-                    for update in extraction.recipe_updates:
-                        if update.url:
-                            try:
-                                logger.info(
-                                    "Extracting recipe from URL for '%s': %s", update.recipe_name, update.url
-                                )
-                                ingredients = await ai_service.extract_recipe_from_url(update.url)
-                                if not ingredients:
-                                    raise ValueError("No ingredient list found on that page")
-                                # Update the recipe
-                                recipe = session.event_data.meal_plan.find_recipe(update.recipe_name)
-                                if recipe:
-                                    recipe.ingredients = [i.model_dump() for i in ingredients]
-                                    recipe.source_type = RecipeSourceType.USER_URL
-                                    recipe.url = update.url
-                                    recipe.status = RecipeStatus.COMPLETE
-                                    recipe.awaiting_user_input = False
-                                session.event_data.last_url_extraction_result = {
-                                    "dish": update.recipe_name,
-                                    "success": True,
-                                    "ingredient_count": len(ingredients),
-                                }
-                            except Exception as url_err:
-                                logger.warning(
-                                    "URL extraction failed for '%s': %s", update.recipe_name, url_err
-                                )
-                                session.event_data.last_url_extraction_result = {
-                                    "dish": update.recipe_name,
-                                    "success": False,
-                                    "error": str(url_err),
-                                }
-                        elif update.description:
-                            try:
-                                logger.info(
-                                    "Extracting recipe from description for '%s': %s", update.recipe_name, update.description[:100]
-                                )
-                                ingredients = await ai_service.extract_recipe_from_description(
-                                    update.description
-                                )
-                                recipe = session.event_data.meal_plan.find_recipe(update.recipe_name)
-                                if recipe:
-                                    recipe.ingredients = [i.model_dump() for i in ingredients]
-                                    recipe.source_type = RecipeSourceType.USER_DESCRIPTION
-                                    recipe.description = update.description
-                                    recipe.status = RecipeStatus.COMPLETE
-                                    recipe.awaiting_user_input = False
-                            except Exception as desc_err:
-                                logger.warning(
-                                    "Description extraction failed for '%s': %s",
-                                    update.recipe_name,
-                                    desc_err,
-                                )
-
-                # During recipe_confirmation, auto-generate default ingredient lists for
-                # any AI_DEFAULT recipes that haven't been generated yet.
-                # EXCLUDE beverages and store-bought items - they don't need recipe extraction.
-                if session.event_data.conversation_stage == "recipe_confirmation":
-                    recipes_needing_ingredients = [
-                        r
-                        for r in session.event_data.meal_plan.recipes
-                        if r.source_type == RecipeSourceType.AI_DEFAULT
-                        and r.needs_ingredients()
-                        and r.status != RecipeStatus.PLACEHOLDER  # Skip placeholders — model will invent wrong dish
-                        and not (r.recipe_type == RecipeType.DRINK and r.preparation_method == PreparationMethod.STORE_BOUGHT)
-                        and r.preparation_method != PreparationMethod.STORE_BOUGHT  # Also skip store-bought food
+                if msg_type == "select_outputs":
+                    # Direct output format selection — bypass AI extraction entirely
+                    formats = msg_data if isinstance(msg_data, list) else []
+                    valid = [
+                        OutputFormat(f)
+                        for f in formats
+                        if f in [e.value for e in OutputFormat]
                     ]
-                    if recipes_needing_ingredients:
+                    if valid:
+                        session.event_data.output_formats = valid
+                        session.event_data.conversation_stage = "agent_running"
                         logger.info(
-                            "Auto-generating default ingredients for %d AI_DEFAULT recipes (batched)",
-                            len(recipes_needing_ingredients),
+                            "🎯 OUTPUT SELECTED (session=%s): %s",
+                            session_id[:8],
+                            [f.value for f in valid],
                         )
-                        results = await ai_service.generate_default_recipes_batch(
-                            [r.name for r in recipes_needing_ingredients]
-                        )
-                        newly_generated = []
-                        for recipe, ingredients in zip(recipes_needing_ingredients, results):
-                            recipe.ingredients = [i.model_dump() for i in ingredients]
-                            recipe.status = RecipeStatus.COMPLETE
-                            newly_generated.append(
-                                {"dish": recipe.name, "ingredients": recipe.ingredients}
+                else:
+                    # Regular message processing
+                    session.add_message(MessageRole.USER, msg_data)
+                    logger.info(
+                        "📨 USER MESSAGE (session=%s, stage=%s): %s",
+                        session_id[:8],
+                        session.event_data.conversation_stage,
+                        msg_data[:100],
+                    )
+
+                    last_assistant = next(
+                        (
+                            m.content
+                            for m in reversed(session.conversation_history)
+                            if m.role == MessageRole.ASSISTANT
+                        ),
+                        None,
+                    )
+                    extraction = await ai_service.extract_event_data(
+                        msg_data, session.event_data, last_assistant
+                    )
+                    logger.info(
+                        "🔄 APPLYING EXTRACTION (stage=%s): %d recipe_updates, meal_plan_confirmed=%s",
+                        session.event_data.conversation_stage,
+                        len(extraction.recipe_updates) if extraction.recipe_updates else 0,
+                        extraction.meal_plan_confirmed,
+                    )
+                    apply_extraction(session, extraction)
+
+                    # Handle URL/description extraction if provided in recipe_updates
+                    if extraction.recipe_updates:
+                        for update in extraction.recipe_updates:
+                            if update.url:
+                                try:
+                                    logger.info(
+                                        "Extracting recipe from URL for '%s': %s", update.recipe_name, update.url
+                                    )
+                                    ingredients = await ai_service.extract_recipe_from_url(update.url)
+                                    if not ingredients:
+                                        raise ValueError("No ingredient list found on that page")
+                                    recipe = session.event_data.meal_plan.find_recipe(update.recipe_name)
+                                    if recipe:
+                                        recipe.ingredients = [i.model_dump(mode="json") for i in ingredients]
+                                        recipe.source_type = RecipeSourceType.USER_URL
+                                        recipe.url = update.url
+                                        recipe.status = RecipeStatus.COMPLETE
+                                        recipe.awaiting_user_input = False
+                                    session.event_data.last_url_extraction_result = {
+                                        "dish": update.recipe_name,
+                                        "success": True,
+                                        "ingredient_count": len(ingredients),
+                                    }
+                                except Exception as url_err:
+                                    logger.warning(
+                                        "URL extraction failed for '%s': %s", update.recipe_name, url_err
+                                    )
+                                    session.event_data.last_url_extraction_result = {
+                                        "dish": update.recipe_name,
+                                        "success": False,
+                                        "error": str(url_err),
+                                    }
+                            elif update.description:
+                                try:
+                                    logger.info(
+                                        "Extracting recipe from description for '%s': %s", update.recipe_name, update.description[:100]
+                                    )
+                                    ingredients = await ai_service.extract_recipe_from_description(
+                                        update.description
+                                    )
+                                    recipe = session.event_data.meal_plan.find_recipe(update.recipe_name)
+                                    if recipe:
+                                        recipe.ingredients = [i.model_dump(mode="json") for i in ingredients]
+                                        recipe.source_type = RecipeSourceType.USER_DESCRIPTION
+                                        recipe.description = update.description
+                                        recipe.status = RecipeStatus.COMPLETE
+                                        recipe.awaiting_user_input = False
+                                except Exception as desc_err:
+                                    logger.warning(
+                                        "Description extraction failed for '%s': %s",
+                                        update.recipe_name,
+                                        desc_err,
+                                    )
+
+                    # During recipe_confirmation, auto-generate default ingredient lists for
+                    # any AI_DEFAULT recipes that haven't been generated yet.
+                    if session.event_data.conversation_stage == "recipe_confirmation":
+                        recipes_needing_ingredients = [
+                            r
+                            for r in session.event_data.meal_plan.recipes
+                            if r.needs_ingredients()
+                            and not r.awaiting_user_input
+                            and r.status != RecipeStatus.PLACEHOLDER
+                            and not (r.recipe_type == RecipeType.DRINK and r.preparation_method == PreparationMethod.STORE_BOUGHT)
+                            and r.preparation_method != PreparationMethod.STORE_BOUGHT
+                        ]
+                        if recipes_needing_ingredients:
+                            logger.info(
+                                "Auto-generating default ingredients for %d recipes (batched)",
+                                len(recipes_needing_ingredients),
                             )
-                        session.event_data.last_generated_recipes = newly_generated
+                            results = await ai_service.generate_default_recipes_batch(
+                                [r.name for r in recipes_needing_ingredients]
+                            )
+                            newly_generated = []
+                            for recipe, ingredients in zip(recipes_needing_ingredients, results):
+                                recipe.ingredients = [i.model_dump(mode="json") for i in ingredients]
+                                recipe.status = RecipeStatus.COMPLETE
+                                newly_generated.append(
+                                    {"dish": recipe.name, "ingredients": recipe.ingredients}
+                                )
+                            session.event_data.last_generated_recipes = newly_generated
+                            session.event_data.compute_derived_fields()
 
                 # If we just transitioned to agent_running, hand off to the agent
                 if session.event_data.conversation_stage == "agent_running":
                     from app.agent.runner import run_agent
-                    from app.models.event import OutputFormat
                     from app.services.tasks_service import TasksService
 
-                    # If Google Tasks was selected but the user hasn't connected yet,
-                    # notify the frontend (so it shows the OAuth button) and wait.
                     needs_google_auth = (
                         _OAUTH_CLIENT_ID
                         and _OAUTH_CLIENT_SECRET
@@ -476,7 +697,19 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                             },
                         })
                         await websocket.send_json({"type": "stream_end"})
+                        # Save before continuing (output_formats may have changed)
+                        async with async_session_factory() as db:
+                            await db_session_manager.save_session(session, db)
                         continue
+
+                    await websocket.send_json({
+                        "type": "event_data_update",
+                        "data": {
+                            "completion_score": session.event_data.completion_score,
+                            "is_complete": session.event_data.is_complete,
+                            "event_data": session.event_data.model_dump(),
+                        },
+                    })
 
                     tasks_service = None
                     if _OAUTH_CLIENT_ID and _OAUTH_CLIENT_SECRET and OutputFormat.GOOGLE_TASKS in session.event_data.output_formats:
@@ -490,6 +723,67 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         existing_state=session.agent_state,
                         tasks_service=tasks_service,
                     )
+
+                    session.event_data.conversation_stage = "complete"
+
+                    # Auto-save a plan snapshot now that the agent has finished
+                    if session.agent_state and session.agent_state.shopping_list is not None:
+                        try:
+                            async with async_session_factory() as plan_db:
+                                await plan_manager.save_plan(
+                                    user_id=uuid.UUID(user_id_str),
+                                    session_id=uuid.UUID(session_id),
+                                    event_data=session.event_data,
+                                    agent_state=session.agent_state,
+                                    db=plan_db,
+                                )
+                        except Exception as plan_err:
+                            logger.error("Failed to auto-save plan: %s", plan_err)
+
+                    await websocket.send_json({
+                        "type": "event_data_update",
+                        "data": {
+                            "completion_score": session.event_data.completion_score,
+                            "is_complete": session.event_data.is_complete,
+                            "event_data": session.event_data.model_dump(),
+                        },
+                    })
+                    async with async_session_factory() as db:
+                        await db_session_manager.save_session(session, db)
+                    continue
+
+                # When stage is selecting_output, send structured options card
+                if session.event_data.conversation_stage == "selecting_output":
+                    await websocket.send_json({
+                        "type": "event_data_update",
+                        "data": {
+                            "completion_score": session.event_data.completion_score,
+                            "is_complete": session.event_data.is_complete,
+                            "event_data": session.event_data.model_dump(),
+                        },
+                    })
+                    await websocket.send_json({
+                        "type": "output_selection",
+                        "options": [
+                            {
+                                "value": "google_sheet",
+                                "label": "Google Sheet",
+                                "description": "Formula-driven spreadsheet, quantities auto-adjust",
+                            },
+                            {
+                                "value": "google_tasks",
+                                "label": "Google Tasks",
+                                "description": "Checklist format, great for shopping on your phone",
+                            },
+                            {
+                                "value": "in_chat",
+                                "label": "In-chat list",
+                                "description": "Formatted list right here in the conversation",
+                            },
+                        ],
+                    })
+                    async with async_session_factory() as db:
+                        await db_session_manager.save_session(session, db)
                     continue
 
                 # Send metadata immediately
@@ -512,7 +806,6 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     await websocket.send_json({"type": "stream_chunk", "data": {"text": chunk}})
                     full_response.append(chunk)
 
-                # Signal done and save complete message to history
                 complete_response = "".join(full_response)
                 session.add_message(MessageRole.ASSISTANT, complete_response)
                 logger.info(
@@ -521,6 +814,10 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     complete_response[:100] + "..." if len(complete_response) > 100 else complete_response,
                 )
                 await websocket.send_json({"type": "stream_end"})
+
+                # Persist session state after each message round-trip
+                async with async_session_factory() as db:
+                    await db_session_manager.save_session(session, db)
 
             except Exception as e:
                 logger.error(f"Error processing message: {e}")
@@ -541,11 +838,14 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
 
 @app.post("/api/sessions/{session_id}/extract-recipe")
-async def extract_recipe_from_url(session_id: str, body: dict):
+async def extract_recipe_from_url(
+    session_id: str,
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Extract ingredients from a recipe URL."""
-    session = session_manager.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    session = await _require_session_owner(session_id, current_user, db)
     if not ai_service:
         raise HTTPException(status_code=503, detail="AI service not available")
 
@@ -591,13 +891,15 @@ async def extract_recipe_from_url(session_id: str, body: dict):
 
     recipe.source_type = RecipeSourceType.USER_URL
     recipe.url = url
-    recipe.ingredients = [i.model_dump() for i in ingredients]
+    recipe.ingredients = [i.model_dump(mode="json") for i in ingredients]
     recipe.status = RecipeStatus.COMPLETE
     recipe.awaiting_user_input = False
 
+    await db_session_manager.save_session(session, db)
+
     return {
         "dish_name": dish_name,
-        "ingredients": [i.model_dump() for i in ingredients],
+        "ingredients": [i.model_dump(mode="json") for i in ingredients],
         "success": True,
         "message": None,
     }
@@ -608,11 +910,11 @@ async def upload_recipe(
     session_id: str,
     dish_name: str,
     file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Extract ingredients from an uploaded recipe file (PDF, TXT, JPG, PNG)."""
-    session = session_manager.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    session = await _require_session_owner(session_id, current_user, db)
     if not ai_service:
         raise HTTPException(status_code=503, detail="AI service not available")
 
@@ -640,36 +942,38 @@ async def upload_recipe(
 
     final_dish_name = dish_name
 
-    # If this is a placeholder and we extracted an actual dish name, rename it
     if recipe.status == RecipeStatus.PLACEHOLDER and extracted_dish_name:
         recipe.name = extracted_dish_name
         final_dish_name = extracted_dish_name
         logger.info(f"Replaced placeholder '{dish_name}' with extracted '{extracted_dish_name}'")
 
-    # Update recipe with ingredients and source info
-    recipe.ingredients = [i.model_dump() for i in ingredients]
+    recipe.ingredients = [i.model_dump(mode="json") for i in ingredients]
     recipe.source_type = RecipeSourceType.USER_UPLOAD
     recipe.awaiting_user_input = False
-    # Set status to COMPLETE only if we got ingredients
     recipe.status = RecipeStatus.COMPLETE if len(ingredients) > 0 else RecipeStatus.NAMED
+
+    await db_session_manager.save_session(session, db)
 
     return {
         "dish_name": final_dish_name,
-        "ingredients": [i.model_dump() for i in ingredients],
+        "ingredients": [i.model_dump(mode="json") for i in ingredients],
     }
 
 
 # ============================================================================
-# Google OAuth Endpoints
+# Google OAuth Endpoints — Tasks (popup-based, separate from login)
 # ============================================================================
 
 
 @app.get("/api/auth/google/start")
-async def google_auth_start(session_id: str):
+async def google_auth_start(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """
-    Generate a Google OAuth authorization URL for the given session.
+    Generate a Google OAuth authorization URL for Tasks access.
     The frontend opens this URL in a popup to begin the OAuth flow.
-    Returns 503 if OAuth credentials are not configured.
     """
     if not _OAUTH_CLIENT_ID or not _OAUTH_CLIENT_SECRET:
         raise HTTPException(
@@ -677,9 +981,7 @@ async def google_auth_start(session_id: str):
             detail="Google OAuth is not configured. Set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET.",
         )
 
-    session = session_manager.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    await _require_session_owner(session_id, current_user, db)
 
     flow = _build_oauth_flow()
     auth_url, _ = flow.authorization_url(
@@ -692,14 +994,20 @@ async def google_auth_start(session_id: str):
 
 
 @app.get("/api/auth/google/callback", response_class=HTMLResponse)
-async def google_auth_callback(code: str, state: str):
+async def google_auth_callback(
+    code: str,
+    state: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """
-    OAuth callback — exchanges the authorization code for tokens and stores
+    OAuth callback — exchanges the authorization code for Tasks tokens and stores
     them on the session identified by the `state` parameter (session_id).
     Returns an HTML page that closes the popup window.
     """
-    session = session_manager.get_session(state)
-    if not session:
+    try:
+        session = await _require_session_owner(state, current_user, db)
+    except HTTPException:
         return HTMLResponse("<script>window.close();</script>", status_code=400)
 
     try:
@@ -714,9 +1022,10 @@ async def google_auth_callback(code: str, state: str):
             "client_secret": creds.client_secret,
             "scopes": list(creds.scopes) if creds.scopes else [GOOGLE_TASKS_SCOPE],
         }
-        logger.info("Google OAuth complete for session %s", state)
+        await db_session_manager.save_session(session, db)
+        logger.info("Google Tasks OAuth complete for session %s", state)
     except Exception as exc:
-        logger.error("Google OAuth callback failed: %s", exc)
+        logger.error("Google Tasks OAuth callback failed: %s", exc)
         return HTMLResponse(
             "<script>window.opener?.postMessage('google_auth_error','*');window.close();</script>",
             status_code=200,
@@ -728,17 +1037,71 @@ async def google_auth_callback(code: str, state: str):
 
 
 # ============================================================================
-# Debug Endpoints (TODO: Protect with auth in production)
+# Saved Plans Endpoints
+# ============================================================================
+
+
+@app.get("/api/plans")
+async def list_plans(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all saved plans for the current user (lightweight summary)."""
+    plans = await plan_manager.list_user_plans(current_user.id, db)
+    return {"plans": plans}
+
+
+@app.get("/api/plans/{plan_id}")
+async def get_plan(
+    plan_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get full detail for a saved plan."""
+    row = await plan_manager.get_plan(plan_id, db)
+    if row is None or row.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    return {
+        "id": str(row.id),
+        "name": row.name,
+        "created_at": row.created_at.isoformat(),
+        "event_data": row.event_data,
+        "shopping_list": row.shopping_list,
+        "formatted_output": row.formatted_output,
+        "formatted_recipes_output": row.formatted_recipes_output,
+    }
+
+
+@app.delete("/api/plans/{plan_id}")
+async def delete_plan(
+    plan_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a saved plan."""
+    row = await plan_manager.get_plan(plan_id, db)
+    if row is None or row.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    await plan_manager.delete_plan(plan_id, db)
+    return {"ok": True}
+
+
+# ============================================================================
+# Debug Endpoints
 # ============================================================================
 
 
 @app.get("/debug/sessions")
-async def debug_list_sessions():
-    """Debug endpoint to list all active sessions"""
-    # TODO: Add authentication/authorization
+async def debug_list_sessions(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Debug endpoint — lists the current user's sessions."""
+    sessions = await db_session_manager.list_user_sessions(current_user.id, db)
     return {
-        "active_sessions": len(session_manager.sessions),
-        "sessions": session_manager.list_active_sessions(),
+        "user_id": str(current_user.id),
+        "session_count": len(sessions),
+        "sessions": sessions,
     }
 
 

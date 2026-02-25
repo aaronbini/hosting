@@ -5,15 +5,21 @@ format_chat_output has no external dependencies — tested directly.
 Steps that call GeminiService are tested with a mock.
 """
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from app.agent.state import AgentState, AgentStage
-from app.agent.steps import format_chat_output
-from app.models.event import EventPlanningData, OutputFormat
+from app.agent.steps import format_chat_output, generate_recipes
+from app.models.event import EventPlanningData, MealPlan, OutputFormat, PreparationMethod, Recipe, RecipeStatus
 from app.models.shopping import (
     AggregatedIngredient,
+    DishCategory,
+    DishIngredients,
+    DishServingSpec,
     GroceryCategory,
     QuantityUnit,
+    RecipeIngredient,
     ShoppingList,
 )
 
@@ -121,3 +127,132 @@ class TestFormatChatOutput:
         result = await format_chat_output(state)
         # Should produce a header but no items
         assert "## Shopping List" in result.formatted_chat_output
+
+
+# ---------------------------------------------------------------------------
+# generate_recipes
+# ---------------------------------------------------------------------------
+
+
+def _make_dish_ingredients(
+    dish_name: str,
+    category: DishCategory = DishCategory.MAIN_PROTEIN,
+    total_servings: int = 8,
+) -> DishIngredients:
+    spec = DishServingSpec(
+        dish_name=dish_name,
+        dish_category=category,
+        adult_servings=float(total_servings),
+        child_servings=0.0,
+        total_servings=float(total_servings),
+    )
+    return DishIngredients(
+        dish_name=dish_name,
+        serving_spec=spec,
+        ingredients=[
+            RecipeIngredient(
+                name="test ingredient",
+                quantity=2.0,
+                unit=QuantityUnit.LBS,
+                grocery_category=GroceryCategory.PANTRY,
+            )
+        ],
+    )
+
+
+def _make_recipes_state(
+    dishes: list[tuple[str, DishCategory, PreparationMethod]],
+) -> AgentState:
+    """Build an AgentState with meal plan recipes and dish_ingredients."""
+    meal_plan = MealPlan()
+    dish_ingredients = []
+    for dish_name, category, prep_method in dishes:
+        meal_plan.add_recipe(
+            Recipe(
+                name=dish_name,
+                status=RecipeStatus.COMPLETE,
+                preparation_method=prep_method,
+                ingredients=[{"name": "test", "quantity": 1, "unit": "lbs", "grocery_category": "pantry"}],
+            )
+        )
+        dish_ingredients.append(_make_dish_ingredients(dish_name, category))
+    meal_plan.confirmed = True
+    return AgentState(
+        event_data=EventPlanningData(adult_count=8, meal_plan=meal_plan),
+        output_formats=[OutputFormat.IN_CHAT],
+        dish_ingredients=dish_ingredients,
+    )
+
+
+class TestGenerateRecipes:
+    async def test_includes_homemade_dishes(self):
+        state = _make_recipes_state([
+            ("Pasta Carbonara", DishCategory.MAIN_PROTEIN, PreparationMethod.HOMEMADE),
+        ])
+        ai_service = AsyncMock()
+        ai_service.generate_recipe_instructions_batch.return_value = {
+            "Pasta Carbonara": ["Boil pasta.", "Mix eggs and cheese.", "Combine."]
+        }
+        result = await generate_recipes(state, ai_service)
+        assert result.formatted_recipes_output is not None
+        assert "Pasta Carbonara" in result.formatted_recipes_output
+        assert "Boil pasta." in result.formatted_recipes_output
+        ai_service.generate_recipe_instructions_batch.assert_called_once()
+
+    async def test_recipes_header_in_output(self):
+        state = _make_recipes_state([
+            ("Tiramisu", DishCategory.DESSERT, PreparationMethod.HOMEMADE),
+        ])
+        ai_service = AsyncMock()
+        ai_service.generate_recipe_instructions_batch.return_value = {
+            "Tiramisu": ["Whip cream.", "Layer ladyfingers."]
+        }
+        result = await generate_recipes(state, ai_service)
+        assert "## Recipes" in result.formatted_recipes_output
+
+    async def test_skips_store_bought_dishes(self):
+        state = _make_recipes_state([
+            ("Store-bought Hummus", DishCategory.PASSED_APPETIZER, PreparationMethod.STORE_BOUGHT),
+        ])
+        ai_service = AsyncMock()
+        result = await generate_recipes(state, ai_service)
+        assert result.formatted_recipes_output is None
+        ai_service.generate_recipe_instructions_batch.assert_not_called()
+
+    async def test_skips_beverage_dishes(self):
+        state = _make_recipes_state([
+            ("Wine", DishCategory.BEVERAGE_ALCOHOLIC, PreparationMethod.HOMEMADE),
+            ("Sparkling Water", DishCategory.BEVERAGE_NONALCOHOLIC, PreparationMethod.STORE_BOUGHT),
+        ])
+        ai_service = AsyncMock()
+        result = await generate_recipes(state, ai_service)
+        assert result.formatted_recipes_output is None
+        ai_service.generate_recipe_instructions_batch.assert_not_called()
+
+    async def test_no_eligible_dishes_returns_none(self):
+        state = _make_recipes_state([
+            ("Beer", DishCategory.BEVERAGE_ALCOHOLIC, PreparationMethod.STORE_BOUGHT),
+            ("Pre-made Salad", DishCategory.SALAD, PreparationMethod.STORE_BOUGHT),
+        ])
+        ai_service = AsyncMock()
+        result = await generate_recipes(state, ai_service)
+        assert result.formatted_recipes_output is None
+
+    async def test_mixed_dishes_only_includes_homemade(self):
+        state = _make_recipes_state([
+            ("Pasta", DishCategory.MAIN_PROTEIN, PreparationMethod.HOMEMADE),
+            ("Wine", DishCategory.BEVERAGE_ALCOHOLIC, PreparationMethod.STORE_BOUGHT),
+            ("Store Bread", DishCategory.BREAD, PreparationMethod.STORE_BOUGHT),
+        ])
+        ai_service = AsyncMock()
+        ai_service.generate_recipe_instructions_batch.return_value = {
+            "Pasta": ["Cook pasta."]
+        }
+        result = await generate_recipes(state, ai_service)
+        assert result.formatted_recipes_output is not None
+        assert "Pasta" in result.formatted_recipes_output
+        assert "Wine" not in result.formatted_recipes_output
+        # Verify only homemade dish was sent to AI
+        call_args = ai_service.generate_recipe_instructions_batch.call_args[0][0]
+        dish_names = [d[0] for d in call_args]
+        assert dish_names == ["Pasta"]
