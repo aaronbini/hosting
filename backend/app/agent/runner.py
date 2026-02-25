@@ -30,6 +30,7 @@ from app.agent.steps import (
     create_google_sheet,
     create_google_tasks,
     format_chat_output,
+    generate_recipes,
     get_all_dish_ingredients,
 )
 from app.models.event import EventPlanningData, OutputFormat
@@ -170,7 +171,7 @@ async def run_agent(
                         else None,
                         "message": (
                             "Here's your shopping list! Review it and let me know if anything "
-                            "needs adjusting, or type 'looks good' to proceed."
+                            "needs adjusting, or click 'Approve' below to proceed."
                         ),
                     },
                 )
@@ -185,6 +186,19 @@ async def run_agent(
                 review_msg = await websocket.receive_json()
 
                 if review_msg.get("type") == "approve":
+                    excluded = review_msg.get("excluded_items", [])
+                    if excluded and state.shopping_list:
+                        excluded_set = {name.lower() for name in excluded}
+                        state.shopping_list.items = [
+                            item for item in state.shopping_list.items
+                            if item.name.lower() not in excluded_set
+                        ]
+                        state.shopping_list.build_grouped()
+                        logger.info(
+                            "Removed %d excluded items; %d items remain",
+                            len(excluded),
+                            len(state.shopping_list.items),
+                        )
                     break
 
                 corrections = (
@@ -219,7 +233,10 @@ async def run_agent(
             },
         )
 
-        delivery_tasks = [format_chat_output(state)]
+        delivery_tasks = [
+            format_chat_output(state),
+            generate_recipes(state, ai_service),
+        ]
 
         if OutputFormat.GOOGLE_SHEET in output_formats:
             delivery_tasks.append(create_google_sheet(state))
@@ -245,6 +262,7 @@ async def run_agent(
                 "type": "agent_complete",
                 "stage": AgentStage.COMPLETE,
                 "formatted_output": state.formatted_chat_output,
+                "formatted_recipes_output": state.formatted_recipes_output,
                 "google_sheet_url": state.google_sheet_url,
                 "google_tasks": state.google_tasks.model_dump() if state.google_tasks else None,
             },

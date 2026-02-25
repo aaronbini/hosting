@@ -30,6 +30,7 @@ class AgentStage(str):
     AGGREGATING = "aggregating"
     AWAITING_REVIEW = "awaiting_review"
     APPLYING_CORRECTIONS = "applying_corrections"
+    GENERATING_RECIPES = "generating_recipes"
     DELIVERING = "delivering"
     COMPLETE = "complete"
     ERROR = "error"
@@ -76,6 +77,9 @@ class AgentState(BaseModel):
     # Free-text corrections the user typed during the review checkpoint.
     # apply_corrections() reads this and produces a revised shopping_list.
     user_corrections: Optional[str] = None
+
+    # --- Step 6 output: full recipes for homemade dishes ---
+    formatted_recipes_output: Optional[str] = None
 
     # --- Step 7 outputs ---
     google_sheet_url: Optional[str] = None

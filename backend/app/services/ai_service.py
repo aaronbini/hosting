@@ -73,18 +73,40 @@ _MAX_CONTENT_CHARS = 30_000
 
 INGREDIENT_UNIT_RULES = """
 - Use shopping-friendly units that match how items are actually sold:
+    * Don't present anything in teaspoons, tablespoons, or cups — these are not standard for grocery shopping and lead to confusion.
     * Proteins (meat, fish): oz or lbs
     * Dry goods (pasta, rice, flour, sugar, breadcrumbs, oats, lentils): oz or lbs — NEVER cups
     * Fresh produce (vegetables, fruit): oz, lbs, count, or bunch as appropriate
     * Liquids (broth, wine, cream, milk): fl oz, pints, quarts, or liters
-    * Small liquid amounts (oil, sauces, condiments): tbsp or fl oz
-    * Spices and seasonings: tsp or tbsp
+    * Small liquid amounts (oil, sauces, condiments): fl oz
+    * Spices and seasonings: oz
     * Eggs, lemons, onions, whole items: count
     * Garlic: bulbs or heads. if cloves are specified in the recipe, convert to bulbs (1 bulb ≈ 10 cloves).
     * Canned goods: cans
     * Packaged items: packages
 - Do NOT use cups for any solid or dry ingredient.
 - Do NOT include water — it is never a grocery item.
+"""
+
+# Quantity calibration targets used in generate_default_recipes_batch.
+# These anchor AI-generated base recipes (4 servings) to realistic shopping
+# amounts so that Python scaling produces correct totals at the guest count.
+BASE_RECIPE_QUANTITY_GUIDE = """
+Quantity calibration for 4 adult servings — use these as firm targets:
+- Proteins (meat, fish, seafood): 20-24 oz TOTAL across ALL protein types in the dish.
+  If the dish has multiple proteins (e.g., shrimp + clams + mussels), this is the
+  COMBINED total — divide it across each type, do NOT give each type 20-24 oz.
+- Dry pasta, rice, or grains: 8-12 oz total (2-3 oz per person)
+- Cooking oils (olive oil, vegetable oil, butter): 1-2 fl oz TOTAL for the whole dish.
+  Use the minimum needed for cooking — not recipe-blog generous amounts.
+- Fresh vegetables (per type): 8-16 oz (½ to 1 lb)
+- Garlic: ½ to 1 bulb
+- Onions or shallots: 1-2 count
+- Fresh herbs (per type): 1 bunch
+- Canned goods (tomatoes, beans, etc.): 1-2 cans
+- Broth or stock: 8-16 fl oz
+- Dairy (cream, milk): 4-8 fl oz
+These are shopping quantities, not restaurant portions. Err conservative.
 """
 
 
@@ -119,6 +141,19 @@ class _BatchExtractedRecipes(BaseModel):
     """Response schema for batched default recipe generation."""
 
     dishes: list[_ExtractedRecipe]
+
+
+class _RecipeDetails(BaseModel):
+    """Step-by-step instructions for one dish (ingredients provided separately)."""
+
+    dish_name: str
+    instructions: list[str]
+
+
+class _RecipeDetailsBatch(BaseModel):
+    """Response schema for batched recipe instruction generation."""
+
+    recipes: list[_RecipeDetails]
 
 
 class GeminiService:
@@ -188,6 +223,11 @@ class GeminiService:
                                 - If user provides dishes: acknowledge them, ask if they want to add more
                                   categories (appetizer, sides, dessert, beverages). Treat beverages as
                                   part of the meal plan (e.g., "Wine", "Beer", "Sparkling Water").
+                                  CRITICAL for beverages: list EACH specific beverage as its own separate
+                                  numbered menu item (e.g., "Vermentino wine", "Sparkling water",
+                                  "Negroni Sbagliato"). NEVER group them under a theme/collection name
+                                  (e.g., "Italian Coastal Selection") — such labels cannot be put on a
+                                  shopping list and will confuse the system.
                                 - If user wants suggestions (for a full menu or specific categories): be
                                   creative and specific — avoid the most predictable or generic dishes for
                                   this cuisine. Consider regional variations (e.g., Sicilian vs Milanese vs
@@ -245,9 +285,11 @@ class GeminiService:
                               - If they confirm everything: acknowledge and move on.
                               - If they want to change a dish: acknowledge the change and confirm the new approach.
                               - If they want to provide their own recipe: guide them (URL, upload, description).
-                              - If they ask for a full recipe for any dish: provide a complete recipe including
-                                serving size, ingredients with quantities, and numbered step-by-step instructions.
-                                Scale the recipe to serve the number of guests in the event data.
+                              - If they ask for a full recipe for any dish: acknowledge warmly and let them
+                                know that full recipes (with step-by-step instructions, scaled for their
+                                guest count) will be included in the final output alongside the shopping list.
+                                There's no need to generate them in chat — they'll be nicely formatted and
+                                easy to reference while cooking. Then continue confirming the ingredient lists.
 
                               For dishes where the user has their own recipe:
                               - They can paste a URL to an online recipe (ask them to paste the URL directly in chat)
@@ -296,7 +338,9 @@ class GeminiService:
                               3. **In-chat list** — formatted list right here in the conversation
                               4. **Any combination** of the above
 
-                              Ask once, accept their choice, then confirm.
+                              Ask once, accept their choice, then confirm their selection briefly.
+                              CRITICAL: Do NOT generate the shopping list yourself. The system will
+                              produce it automatically once the output format is selected.
 
                             IF conversation_stage == "agent_running":
                               The agent is calculating. Do not generate conversational responses.
@@ -410,7 +454,7 @@ class GeminiService:
         response = await self.client.aio.models.generate_content(
             model=self.model_name,
             contents=contents,
-            config=types.GenerateContentConfig(system_instruction=system_with_context, temperature=1.1),
+            config=types.GenerateContentConfig(system_instruction=system_with_context, temperature=1.2),
         )
         return response.text
 
@@ -429,7 +473,7 @@ class GeminiService:
         stream = await self.client.aio.models.generate_content_stream(
             model=self.model_name,
             contents=contents,
-            config=types.GenerateContentConfig(system_instruction=system_with_context, temperature=1.1),
+            config=types.GenerateContentConfig(system_instruction=system_with_context, temperature=1.2),
         )
         chunk_count = 0
         async for chunk in stream:
@@ -479,6 +523,13 @@ class GeminiService:
 
                     IF stage == "gathering":
                     - Extract standard event fields (event_type, guest counts, cuisine, etc.) as before.
+                    - cuisine_preferences must only contain broad cuisine STYLES (e.g. "Italian",
+                      "Asian", "Mediterranean"). Never put dish types ("pasta"), ingredients
+                      ("seafood"), or dietary terms ("vegetarian") here — those belong in
+                      recipe_updates or dietary_restrictions respectively.
+                    - NEVER overwrite an already-set cuisine_preferences unless the user explicitly
+                      changes their cuisine choice. Dish-level requests (e.g. "I want a pasta main")
+                      should produce a recipe_update, not a cuisine update.
                     - For recipe_updates: list RecipeUpdate objects for any meal plan changes:
 
                       ⚠️  IMPORTANT: If there are existing recipes with awaiting_user_input=true, do NOT
@@ -504,6 +555,22 @@ class GeminiService:
                       Example: User says "We'll have wine and beer" →
                         {{"recipe_name": "Wine", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "store_bought", "awaiting_user_input": false}}
                         {{"recipe_name": "Beer", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "store_bought", "awaiting_user_input": false}}
+
+                      CONFIRMING ASSISTANT-SUGGESTED BEVERAGES: When the previous assistant message
+                      contained beverage suggestions and the user confirms them (e.g., "looks good",
+                      "yes", "perfect") AND those beverages are not yet in the current meal plan:
+                      - Apply the same rules above — extract each specific, purchasable beverage as
+                        a separate recipe with recipe_type="drink" and preparation_method="store_bought".
+                      - If the assistant grouped beverages under a theme/collection label (e.g.,
+                        "Italian Coastal Selection – Vermentino or Falanghina, Sparkling Water,
+                        Negroni Sbagliato"), the label itself is NOT a beverage. NEVER add it as a
+                        recipe. Extract ONLY the specific drinks listed after the dash/colon.
+                      - If the assistant offered "X or Y" alternatives, pick the first one listed.
+                      Example: assistant suggested "Italian Coastal Selection – Vermentino or
+                      Falanghina, Sparkling Water, Negroni Sbagliato", user says "looks good" →
+                        {{"recipe_name": "Vermentino", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "store_bought", "awaiting_user_input": false}}
+                        {{"recipe_name": "Sparkling Water", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "store_bought", "awaiting_user_input": false}}
+                        {{"recipe_name": "Negroni Sbagliato", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "store_bought", "awaiting_user_input": false}}
 
                       FOOD ITEMS: For food dishes:
                       - Set recipe_type to "food" (this is the default, so you can omit it)
@@ -540,6 +607,60 @@ class GeminiService:
                       "Slow-braised Beef Short Rib Ragu" for the main, user says "yes" →
                         {{"recipe_name": "main", "action": "update", "new_name": "Slow-braised Beef Short Rib Ragu", "status": "named"}}
 
+                      CAPTURING INGREDIENTS FROM CONFIRMED SUGGESTIONS:
+                      If the Previous assistant message listed specific ingredients for a dish
+                      (e.g., "I'd suggest a cheesecake — it uses cream cheese, eggs, sugar,
+                      graham crackers, and butter") AND the user POSITIVELY confirms that dish
+                      (e.g., "yes", "sounds great", "perfect"), capture the ingredient names
+                      as a natural-language description field on the RecipeUpdate. This
+                      preserves the agreed-upon recipe so it is not regenerated from scratch later.
+                      Example: assistant proposed "cheesecake with cream cheese, eggs, sugar,
+                      graham crackers, butter", user says "yes, that sounds great" →
+                        {{"recipe_name": "cheesecake", "action": "add", "status": "named",
+                          "description": "cream cheese, eggs, sugar, graham crackers, butter"}}
+                      Only set description when the assistant actually listed ingredients
+                      AND the user is confirming (not rejecting) that dish.
+                      Do NOT set description when the user says "no", "different", "something
+                      else", "let's try another", or any other rejection phrasing.
+                      Do NOT invent ingredients that were not in the previous assistant message.
+
+                      REJECTION HANDLING: Distinguish carefully between rejecting a suggestion
+                      vs. removing a dish from the menu entirely.
+
+                      REJECT AND REPLACE — user wants the slot but a different dish:
+                      Signs: "I don't like that", "different suggestion", "something else for
+                      [slot]", "can you try another [type]?", "no, let's go with a different
+                      [type]"
+                      → Keep the slot. If the recipe was already renamed from a placeholder
+                        to a specific dish name, revert it back to the original placeholder:
+                        {{"recipe_name": "[current specific name]", "action": "update",
+                          "new_name": "[original placeholder, e.g. 'side 2']",
+                          "status": "placeholder"}}
+                        If the recipe is still a placeholder name (e.g. "side 2", "main"),
+                        do NOT remove it and do NOT change it — just leave it alone so the
+                        bot can suggest something new.
+                      Do NOT capture any description from the assistant's suggestion
+                      when the user is rejecting it.
+
+                      REJECT AND REMOVE — user wants to eliminate the dish entirely:
+                      Signs: "we don't need [dish]", "remove [dish]", "take that off the
+                      menu", "let's skip [type] altogether"
+                      → {{"recipe_name": "[current name]", "action": "remove"}}
+
+                      MULTIPLE PLACEHOLDERS OF THE SAME TYPE: When the user requests N more
+                      items of the same type (e.g., "2 more sides", "add 3 appetizers"), create
+                      N separate RecipeUpdate entries with UNIQUE names. Count existing recipes
+                      of that type in Current known data and number accordingly:
+                      - 0 existing sides + "2 more sides" → names: "side", "side 2"
+                      - 1 existing side + "2 more sides" → names: "side 2", "side 3"
+                      - 2 existing sides + "3 more sides" → names: "side 3", "side 4", "side 5"
+                      Never use the same recipe_name twice in one extraction — every entry
+                      must have a unique name.
+
+                      STATUS IN GATHERING STAGE: Only use status "placeholder" or "named".
+                      Never set status="complete" — "complete" means the recipe has confirmed
+                      ingredients, which is only set by the system after ingredient extraction.
+
                     - For meal_plan_confirmed: set to true ONLY if the user explicitly confirms the full
                       menu is complete ("looks good", "yes let's go with that menu", "that's everything").
                     - Include "meal_plan" in answered_questions ONLY when meal_plan_confirmed is true,
@@ -551,7 +672,10 @@ class GeminiService:
                       - Set url/description/source_type as appropriate
                       - Set awaiting_user_input to false when user provides the recipe
                       Example: {{"recipe_name": "Caesar Salad", "action": "update", "awaiting_user_input": false}}
-                    - Set meal_plan_confirmed to true ONLY if user confirms ALL recipes are good.
+                    - Set meal_plan_confirmed to true ONLY if user explicitly says ALL recipes look
+                      good and they are ready to proceed (e.g. "yes that all looks great", "let's go").
+                    - NEVER set meal_plan_confirmed to true in the same turn that a recipe is being
+                      added, removed, or swapped — a change request is not confirmation.
                     - Ignore event-level fields unless the user is explicitly correcting them.
 
                     IF stage == "selecting_output":
@@ -695,6 +819,7 @@ class GeminiService:
                     - List all ingredients needed to make each dish.
                     - Standardise names ("olive oil" not "EVOO", "spring onions" not "scallions").
                     {INGREDIENT_UNIT_RULES}
+                    {BASE_RECIPE_QUANTITY_GUIDE}
                     - Assign each ingredient the most appropriate grocery_category.
                     - Do NOT include water.
                     """
@@ -731,6 +856,67 @@ class GeminiService:
                     """
         result = await self._async_json_call(prompt, _ExtractedRecipe, model=self.fast_model_name)
         return result.ingredients
+
+    async def generate_recipe_instructions_batch(
+        self,
+        dishes: list[tuple[str, list[dict], int]],
+    ) -> dict[str, list[str]]:
+        """
+        Generate step-by-step cooking instructions for multiple dishes.
+
+        Each tuple is (dish_name, scaled_ingredients_as_dicts, total_servings).
+        The ingredient lists are already scaled to the final guest count so the
+        instructions can reference exact quantities.
+
+        Returns a dict mapping dish_name → list of instruction strings.
+        Uses the fast model since this is a structured but creative task.
+        """
+        if not dishes:
+            return {}
+
+        dishes_text = ""
+        for dish_name, ingredients, total_servings in dishes:
+            ingredient_lines = "\n".join(
+                f"  - {ing.get('quantity', '')} {ing.get('unit', '')} {ing.get('name', '')}".strip()
+                for ing in ingredients
+            )
+            dishes_text += (
+                f"\nDish: {dish_name}\n"
+                f"Servings: {total_servings}\n"
+                f"Ingredients:\n{ingredient_lines}\n"
+            )
+
+        prompt = f"""Write step-by-step cooking instructions for each dish below.
+                    The ingredient quantities are already scaled to the number of servings listed.
+
+                    Rules:
+                    - Write clear, practical instructions a home cook can follow.
+                    - Reference the specific ingredients and quantities provided.
+                    - Each instruction step should be a single complete action.
+                    - Include timing guidance where helpful (e.g., "cook for 10 minutes").
+                    - Do NOT add ingredients not in the list.
+                    - Return one entry in 'recipes' per dish, in the same order listed.
+
+                    Dishes:
+                    {dishes_text}
+                    """
+
+        logger.info(
+            "🤖 AI CALL: generate_recipe_instructions_batch (dishes=%d, model=%s)",
+            len(dishes),
+            self.fast_model_name,
+        )
+        result: _RecipeDetailsBatch = await self._async_json_call(
+            prompt,
+            _RecipeDetailsBatch,
+            temperature=0.4,
+            model=self.fast_model_name,
+        )
+        logger.info(
+            "✅ AI RESPONSE: generate_recipe_instructions_batch → %d dishes",
+            len(result.recipes),
+        )
+        return {r.dish_name: r.instructions for r in result.recipes}
 
     # -----------------------------------------------------------------------
     # Recipe / quantity methods (async — called from agent steps)
@@ -784,16 +970,19 @@ class GeminiService:
         One call per dish — these are fanned out in parallel by
         agent/steps.py:get_all_dish_ingredients().
         """
-        # Build recipe context from user-provided recipe if available.
-        # Always include the base serving count so Gemini knows the scale factor
-        # (total_servings / base_servings), not total_servings as a raw multiplier.
+        # Build recipe context with explicit scale factor.
+        # Using scale_factor = total_servings / base_servings means Gemini multiplies
+        # each ingredient by a single number rather than re-interpreting what "1 serving"
+        # means — which was causing over-purchasing for multi-ingredient dishes.
         recipe_context = ""
+        scale_factor: float | None = None
+        base_servings: int | None = None
         if recipe and recipe.ingredients:
             base_servings = recipe.servings or 4
+            scale_factor = round(spec.total_servings / base_servings, 4) if base_servings > 0 else 1.0
             recipe_context = (
-                f"\n The user provided this recipe's ingredient list"
-                f" (this recipe makes {base_servings} servings —"
-                f" scale it to {spec.total_servings} servings):\n"
+                f"\n Base recipe ({base_servings} servings) — multiply every quantity by"
+                f" {scale_factor:.2f}x to reach {spec.total_servings} servings:\n"
                 f" {json.dumps(recipe.ingredients, indent=2)}\n"
             )
 
@@ -836,8 +1025,8 @@ class GeminiService:
                     {INGREDIENT_UNIT_RULES}
                     - Use appropriate units: bottles for wine, cans/bottles for beer, liters for bulk drinks
                     """
-        else:
-            prompt = f"""You are a professional chef. Provide a complete ingredient list for:
+        elif scale_factor is not None:
+            prompt = f"""You are a professional chef. Scale this recipe to the target serving count.
 
                     Dish: {spec.dish_name}
                     Dish category: {spec.dish_category}
@@ -846,16 +1035,33 @@ class GeminiService:
                     Total servings: {spec.total_servings}
                     {recipe_context}
                     {dietary_note}Rules:
-                    - Scale the recipe exactly to the above serving counts.
-                    {serving_hint_line}
-                    - Child servings are ~60% of an adult serving for food items.
+                    - Multiply EVERY ingredient quantity by exactly {scale_factor:.2f}x ({base_servings} → {spec.total_servings} servings).
+                    - Preserve ALL ingredients from the base recipe — do not add or remove any.
+                    - Do NOT apply any per-serving protein or carb targets; the scale factor is the only quantity guide.
                     {INGREDIENT_UNIT_RULES}
                     - Standardise ingredient names ("olive oil" not "EVOO", "spring onions" not "scallions").
-                    - Include ALL components (e.g., pastry AND filling for sausage rolls,
-                      dressing AND leaves for a Caesar salad).
                     - Assign each ingredient the most appropriate grocery_category.
-                    - If user-provided ingredients are included above, use those as the base
-                      recipe and scale them. Do NOT substitute different ingredients.
+                    """
+        else:
+            # Fallback: no base recipe available — generate quantities from scratch.
+            prompt = f"""You are a professional chef. Provide a complete ingredient list for:
+
+                    Dish: {spec.dish_name}
+                    Dish category: {spec.dish_category}
+                    Adult servings: {spec.adult_servings}
+                    Child servings: {spec.child_servings}
+                    Total servings: {spec.total_servings}
+
+                    {dietary_note}Rules:
+                    - Generate appropriate quantities for {spec.total_servings} total servings.
+                    {serving_hint_line}
+                    - Child servings are ~60% of an adult serving for food items.
+                    - For dishes with multiple proteins (e.g., shrimp, clams, mussels), the serving hint
+                      is the TOTAL across all proteins combined — divide it across each protein type.
+                    {INGREDIENT_UNIT_RULES}
+                    - Standardise ingredient names ("olive oil" not "EVOO", "spring onions" not "scallions").
+                    - Include ALL components (e.g., dressing AND leaves for a Caesar salad).
+                    - Assign each ingredient the most appropriate grocery_category.
                     """
         logger.info(
             "🤖 AI CALL: get_dish_ingredients (dish=%s, category=%s, servings=%d)",
@@ -863,11 +1069,9 @@ class GeminiService:
             spec.dish_category.value,
             spec.total_servings,
         )
-        # Use fast model when scaling existing ingredients; main model when generating from scratch
-        model = self.fast_model_name if (recipe and recipe.ingredients) else self.model_name
         logger.info(f"Getting ingredients for recipe: {recipe.model_dump() if recipe else 'No user-provided recipe'}")
         result: DishIngredients = await self._async_json_call(
-            prompt, DishIngredients, temperature=0.0, model=model
+            prompt, DishIngredients, temperature=0.0, model=self.fast_model_name
         )
         # Ensure the serving_spec is attached (Gemini won't include it)
         result.serving_spec = spec
@@ -892,7 +1096,7 @@ class GeminiService:
         by the runner from AgentState — Gemini only returns the items list.
         """
         logger.info("🤖 AI CALL: aggregate_ingredients (dishes=%d)", len(all_dish_ingredients))
-        dishes_json = json.dumps([d.model_dump() for d in all_dish_ingredients], indent=2)
+        dishes_json = json.dumps([d.model_dump(mode="json") for d in all_dish_ingredients], indent=2)
 
         prompt = f"""You are a grocery list builder. Aggregate the ingredient lists
                     below into a single deduplicated shopping list.
@@ -900,6 +1104,13 @@ class GeminiService:
                     Rules:
                     - Combine identical or synonymous ingredients (e.g. treat "scallions" and
                       "spring onions" as the same item; use the more common name).
+                    - Treat ingredient variants that differ only in specificity as the same item.
+                      Use the most specific name that covers all uses. Examples:
+                        "olive oil" + "extra virgin olive oil" → "extra virgin olive oil"
+                        "red wine" + "dry red wine" → "dry red wine"
+                        "white wine" + "dry white wine" → "dry white wine"
+                        "butter" + "unsalted butter" → "unsalted butter"
+                      Never list both a generic and a specific variant of the same ingredient.
                     - Sum quantities for the same ingredient, converting to consistent units where
                       needed (e.g. 4 tbsp + 2 tbsp = 6 tbsp; 8 oz + 8 oz = 1 lb).
                     {INGREDIENT_UNIT_RULES}
@@ -933,7 +1144,7 @@ class GeminiService:
 
         Returns a revised ShoppingList with the same structure.
         """
-        list_json = json.dumps(shopping_list.model_dump(), indent=2)
+        list_json = json.dumps(shopping_list.model_dump(mode="json"), indent=2)
 
         prompt = f"""You are a grocery list editor. Update the shopping list below
                     based on the user's corrections.

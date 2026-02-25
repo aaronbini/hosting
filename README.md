@@ -42,8 +42,8 @@ cd backend
 
 2. Create a virtual environment:
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+uv venv
+source .venv/bin/activate
 ```
 
 3. Install dependencies with uv:
@@ -52,10 +52,11 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 uv sync
 ```
 
-4. Set your Google API key:
+4. Set your env vars, for example:
 ```bash
 export GOOGLE_API_KEY=your_key_here
 ```
+4.a. Or set them in a .env file at the repo root
 
 5. Run the server:
 ```bash

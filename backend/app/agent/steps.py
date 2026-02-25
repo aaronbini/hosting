@@ -19,7 +19,8 @@ import math
 from typing import TYPE_CHECKING
 
 from app.agent.state import AgentStage, AgentState, GoogleTasksResult
-from app.models.shopping import DishCategory
+from app.models.event import PreparationMethod
+from app.models.shopping import DishCategory, DishIngredients, DishServingSpec, RecipeIngredient, QuantityUnit
 from app.services.quantity_engine import calculate_all_serving_specs
 
 # Items that are always assumed available and should never appear on a shopping list.
@@ -88,41 +89,112 @@ async def calculate_quantities(
 # ---------------------------------------------------------------------------
 
 
+def _scale_recipe_in_python(recipe, spec: DishServingSpec) -> DishIngredients:
+    """
+    Scale a recipe's ingredient quantities using pure Python arithmetic.
+
+    LLMs cannot reliably perform strict multiplication — they tend to substitute
+    their own knowledge of "appropriate" quantities for a dish of a given size,
+    bypassing the scale factor entirely. Pure Python guarantees the base recipe
+    proportions are preserved exactly.
+
+    scale_factor = total_servings / base_servings
+    """
+    base_servings = recipe.servings or 4
+    factor = spec.total_servings / base_servings if base_servings > 0 else 1.0
+    scaled_ingredients = []
+    for ing in recipe.ingredients:
+        scaled = dict(ing)
+        scaled["quantity"] = round(ing["quantity"] * factor, 2)
+        scaled_ingredients.append(RecipeIngredient(**scaled))
+    return DishIngredients(
+        dish_name=spec.dish_name,
+        serving_spec=spec,
+        ingredients=scaled_ingredients,
+    )
+
+
 async def get_all_dish_ingredients(
     state: AgentState,
     ai_service: "GeminiService",
 ) -> AgentState:
     """
-    For each DishServingSpec, call Gemini to get a scaled ingredient list.
-    All per-dish calls run concurrently.
+    Produce a scaled ingredient list for every dish in the serving specs.
+
+    Routing logic per dish:
+    - Store-bought: single COUNT entry, no AI call.
+    - Has a base recipe + is not a beverage: pure Python scaling — no Gemini
+      call. This prevents the LLM from substituting its own quantity judgement
+      and ignoring the scale factor, which caused systematic over-purchasing.
+    - Beverage or no base recipe (rare fallback): Gemini call.
     """
     state.stage = AgentStage.GETTING_INGREDIENTS
     logger.info(
-        "[STEP 2] Starting get_all_dish_ingredients: fetching ingredients for %d dishes concurrently",
+        "[STEP 2] Starting get_all_dish_ingredients: %d dishes",
         len(state.serving_specs),
     )
 
-    # Build a lookup of recipes by dish name
+    BEVERAGE_CATEGORIES = {DishCategory.BEVERAGE_ALCOHOLIC, DishCategory.BEVERAGE_NONALCOHOLIC}
+
     recipe_map = {r.name.lower(): r for r in state.event_data.meal_plan.recipes}
 
-    tasks = [
-        ai_service.get_dish_ingredients(
-            spec,
-            recipe=recipe_map.get(spec.dish_name.lower()),
-            dietary_restrictions=state.event_data.dietary_restrictions,
-        )
-        for spec in state.serving_specs
-    ]
+    def _recipe_for(dish_name: str):
+        r = recipe_map.get(dish_name.lower())
+        return r if (r and r.ingredients) else None
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    def _is_store_bought(dish_name: str) -> bool:
+        r = recipe_map.get(dish_name.lower())
+        return r is not None and r.preparation_method == PreparationMethod.STORE_BOUGHT
 
-    dish_ingredients = []
-    for spec, result in zip(state.serving_specs, results):
-        if isinstance(result, Exception):
-            logger.error("get_dish_ingredients failed for '%s': %s", spec.dish_name, result)
-            # Skip the dish rather than aborting the whole agent run
-            continue
-        dish_ingredients.append(result)
+    dish_ingredients: list[DishIngredients] = []
+    specs_for_gemini = []
+
+    for spec in state.serving_specs:
+        if _is_store_bought(spec.dish_name):
+            logger.info("'%s' is store-bought — skipping AI call", spec.dish_name)
+            dish_ingredients.append(
+                DishIngredients(
+                    dish_name=spec.dish_name,
+                    serving_spec=spec,
+                    ingredients=[
+                        RecipeIngredient(
+                            name=spec.dish_name,
+                            quantity=1,
+                            unit=QuantityUnit.COUNT,
+                            grocery_category="other",
+                        )
+                    ],
+                )
+            )
+        elif spec.dish_category not in BEVERAGE_CATEGORIES and _recipe_for(spec.dish_name):
+            recipe = _recipe_for(spec.dish_name)
+            base = recipe.servings or 4
+            scaled = _scale_recipe_in_python(recipe, spec)
+            logger.info(
+                "'%s': Python-scaled %d ingredients by %.2fx (%s→%s servings)",
+                spec.dish_name, len(scaled.ingredients),
+                spec.total_servings / base, base, spec.total_servings,
+            )
+            dish_ingredients.append(scaled)
+        else:
+            # Beverage or no base recipe — use Gemini.
+            specs_for_gemini.append(spec)
+
+    if specs_for_gemini:
+        tasks = [
+            ai_service.get_dish_ingredients(
+                spec,
+                recipe=_recipe_for(spec.dish_name),
+                dietary_restrictions=state.event_data.dietary_restrictions,
+            )
+            for spec in specs_for_gemini
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for spec, result in zip(specs_for_gemini, results):
+            if isinstance(result, Exception):
+                logger.error("get_dish_ingredients failed for '%s': %s", spec.dish_name, result)
+                continue
+            dish_ingredients.append(result)
 
     state.dish_ingredients = dish_ingredients
     logger.info("get_all_dish_ingredients: %d dishes processed", len(dish_ingredients))
@@ -241,6 +313,83 @@ async def create_google_tasks(state: AgentState, tasks_service=None) -> AgentSta
     await tasks_service.create_shopping_list(state.shopping_list, title)
     state.google_tasks = GoogleTasksResult(url="https://tasks.google.com", list_title=title)
     logger.info("[STEP 5b] create_google_tasks: task list %r created", title)
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Step 6 — Generate full recipes for homemade dishes
+# ---------------------------------------------------------------------------
+
+_BEVERAGE_CATEGORIES = frozenset(
+    {DishCategory.BEVERAGE_ALCOHOLIC, DishCategory.BEVERAGE_NONALCOHOLIC}
+)
+
+
+async def generate_recipes(
+    state: AgentState,
+    ai_service: "GeminiService",
+) -> AgentState:
+    """
+    Generate step-by-step cooking instructions for all homemade, non-beverage
+    dishes. Uses the scaled ingredient lists from state.dish_ingredients so the
+    instructions reference exact quantities already computed for the guest count.
+
+    Formats results as a '## Recipes' markdown section stored in
+    state.formatted_recipes_output. Store-bought items and beverages are skipped.
+    """
+    state.stage = AgentStage.GENERATING_RECIPES
+    logger.info("[STEP 6] Starting generate_recipes")
+
+    # Build a lookup of preparation_method per dish name
+    recipe_map = {r.name.lower(): r for r in state.event_data.meal_plan.recipes}
+
+    # Filter to homemade, non-beverage dishes only
+    eligible = [
+        d
+        for d in state.dish_ingredients
+        if d.serving_spec is not None
+        and d.serving_spec.dish_category not in _BEVERAGE_CATEGORIES
+        and recipe_map.get(d.dish_name.lower()) is not None
+        and recipe_map[d.dish_name.lower()].preparation_method != PreparationMethod.STORE_BOUGHT
+    ]
+
+    if not eligible:
+        logger.info("[STEP 6] No eligible homemade dishes — skipping recipe generation")
+        state.formatted_recipes_output = None
+        return state
+
+    logger.info("[STEP 6] Generating recipes for %d dishes", len(eligible))
+
+    dishes_input = [
+        (d.dish_name, [i.model_dump(mode="json") for i in d.ingredients], d.serving_spec.total_servings)
+        for d in eligible
+    ]
+    instructions_map = await ai_service.generate_recipe_instructions_batch(dishes_input)
+
+    # Format markdown
+    lines: list[str] = ["## Recipes\n"]
+    for dish in eligible:
+        instructions = instructions_map.get(dish.dish_name, [])
+        total_servings = dish.serving_spec.total_servings if dish.serving_spec else "?"
+
+        lines.append("---\n")
+        lines.append(f"### {dish.dish_name}")
+        lines.append(f"*Serves {total_servings}*\n")
+
+        lines.append("**Ingredients**")
+        for ing in dish.ingredients:
+            qty = math.ceil(ing.quantity)
+            lines.append(f"- {qty} {ing.unit.value} {ing.name}")
+        lines.append("")
+
+        if instructions:
+            lines.append("**Instructions**")
+            for i, step in enumerate(instructions, 1):
+                lines.append(f"{i}. {step}")
+        lines.append("")
+
+    state.formatted_recipes_output = "\n".join(lines)
+    logger.info("[STEP 6] generate_recipes: formatted %d recipes", len(eligible))
     return state
 
 

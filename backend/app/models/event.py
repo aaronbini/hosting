@@ -329,13 +329,13 @@ class EventPlanningData(BaseModel):
 
         self.completion_score = 0.35 * non_meal_score + 0.65 * meal_plan_score
 
-        # is_complete: all 6 critical questions + confirmed meal plan + no pending recipes
         all_critical_answered = all(
             self.answered_questions.get(q["id"], False)
             for q in CONVERSATION_QUESTIONS["critical"]
         )
-        has_recipes = len(recipes) > 0
         has_unresolved_recipes = len(self.meal_plan.pending_user_recipes) > 0
+
+        has_recipes = len(recipes) > 0
 
         self.is_complete = (
             all_critical_answered

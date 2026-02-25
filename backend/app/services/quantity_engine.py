@@ -26,16 +26,16 @@ from ..models.shopping import DishCategory, DishServingSpec
 # ---------------------------------------------------------------------------
 
 ADULT_SERVINGS_PER_PERSON: dict[DishCategory, float] = {
-    DishCategory.MAIN_PROTEIN: 1.25,  # generous primary protein
-    DishCategory.SECONDARY_PROTEIN: 0.75,  # supplementary protein
+    DishCategory.MAIN_PROTEIN: 1.0,  # generous primary protein
+    DishCategory.SECONDARY_PROTEIN: 0.5,  # supplementary protein
     DishCategory.STARCH_SIDE: 1.0,
     DishCategory.VEGETABLE_SIDE: 1.0,
-    DishCategory.SALAD: 1.25,  # people go back for salad
-    DishCategory.BREAD: 1.5,  # rolls/slices, not loaves
-    DishCategory.DESSERT: 1.25,  # most people take dessert
-    DishCategory.PASSED_APPETIZER: 3.0,  # pieces per person
-    DishCategory.BEVERAGE_ALCOHOLIC: 2.5,  # drinks per person
-    DishCategory.BEVERAGE_NONALCOHOLIC: 3.0,  # glasses per person
+    DishCategory.SALAD: 1.0,  # people go back for salad
+    DishCategory.BREAD: 1.0,  # rolls/slices, not loaves
+    DishCategory.DESSERT: 1.0,  # most people take dessert
+    DishCategory.PASSED_APPETIZER: 2.0,  # pieces per person
+    DishCategory.BEVERAGE_ALCOHOLIC: 1.5,  # drinks per person
+    DishCategory.BEVERAGE_NONALCOHOLIC: 1.5,  # glasses per person
 }
 
 # Children eat roughly 60% of an adult portion for food, same for non-alcoholic
@@ -48,9 +48,9 @@ CHILD_SERVINGS_PER_PERSON: dict[DishCategory, float] = {
     DishCategory.SALAD: 0.50,
     DishCategory.BREAD: 1.0,
     DishCategory.DESSERT: 1.0,  # kids always want dessert
-    DishCategory.PASSED_APPETIZER: 2.0,
+    DishCategory.PASSED_APPETIZER: 1.0,
     DishCategory.BEVERAGE_ALCOHOLIC: 0.0,  # no alcohol for children
-    DishCategory.BEVERAGE_NONALCOHOLIC: 3.0,
+    DishCategory.BEVERAGE_NONALCOHOLIC: 1.0,
 }
 
 
