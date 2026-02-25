@@ -1,5 +1,4 @@
 .DS_Store
-CLAUDE.md
 */node_modules
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -69,4 +68,8 @@ Thumbs.db       # Windows
 # Use a separate file like .env for local environment variables and ignore it.
 .env
 
+#local files
 notes.txt
+
+#Claude Code files that don't need to be tracked
+.claude/

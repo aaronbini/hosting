@@ -4,6 +4,29 @@ export interface DietaryRestriction {
   notes?: string
 }
 
+export type RecipeStatus = 'placeholder' | 'named' | 'complete'
+export type RecipeSourceType = 'ai_default' | 'user_url' | 'user_upload' | 'user_description'
+export type RecipeType = 'food' | 'drink'
+export type PreparationMethod = 'store_bought' | 'homemade'
+
+export interface Recipe {
+  name: string
+  status: RecipeStatus
+  ingredients: any[]
+  source_type: RecipeSourceType
+  recipe_type: RecipeType
+  preparation_method: PreparationMethod
+  url?: string
+  description?: string
+  servings: number
+  awaiting_user_input: boolean
+}
+
+export interface MealPlan {
+  recipes: Recipe[]
+  confirmed: boolean
+}
+
 export interface EventData {
   event_type?: string
   event_date?: string
@@ -18,9 +41,7 @@ export interface EventData {
   foods_to_avoid: string[]
   available_equipment: string[]
   formality_level?: string
-  meal_plan: string[]
-  recipe_promises: string[]
-  pending_upload_dish?: string
+  meal_plan: MealPlan
   budget?: number
   budget_per_person?: number
   output_formats: string[]
