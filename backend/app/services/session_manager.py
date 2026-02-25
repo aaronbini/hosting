@@ -1,4 +1,3 @@
-import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
@@ -26,11 +25,24 @@ class SessionData:
         self.conversation_history.append(ChatMessage(role=role, content=content))
         self.last_updated = datetime.now()
 
+    # List fields that should be merged (union) rather than replaced on update.
+    _MERGE_LIST_FIELDS = {"cuisine_preferences", "dietary_restrictions", "available_equipment"}
+
     def update_event_data(self, data_dict: dict):
         """Update event planning data and recompute fields"""
-        # Update model fields
         for key, value in data_dict.items():
-            if hasattr(self.event_data, key):
+            if not hasattr(self.event_data, key):
+                continue
+            if key in self._MERGE_LIST_FIELDS and isinstance(value, list):
+                existing = getattr(self.event_data, key) or []
+                if existing and isinstance(existing[0], str):
+                    # Simple string lists — dedupe while preserving order
+                    merged = list(dict.fromkeys(existing + value))
+                else:
+                    # Pydantic objects (e.g. DietaryRestriction) — append new entries
+                    merged = existing + [v for v in value if v not in existing]
+                setattr(self.event_data, key, merged)
+            else:
                 setattr(self.event_data, key, value)
 
         # Recompute derived fields
@@ -48,48 +60,3 @@ class SessionData:
         }
 
 
-class SessionManager:
-    """
-    Manages user sessions and conversation state
-
-    TODO: Replace in-memory storage with persistent datastore (Redis, PostgreSQL, etc.)
-    Current implementation stores everything in memory, so data is lost on restart.
-    For production, integrate with:
-    - Redis for session caching
-    - PostgreSQL for persistent storage
-    - Implement session expiration (e.g., 24 hours)
-    """
-
-    def __init__(self):
-        self.sessions: dict[str, SessionData] = {}
-
-    def create_session(self) -> str:
-        """Create a new session and return session ID"""
-        session_id = str(uuid.uuid4())
-        self.sessions[session_id] = SessionData(session_id)
-        return session_id
-
-    def get_session(self, session_id: str) -> Optional[SessionData]:
-        """Retrieve an existing session"""
-        return self.sessions.get(session_id)
-
-    def session_exists(self, session_id: str) -> bool:
-        """Check if session exists"""
-        return session_id in self.sessions
-
-    def delete_session(self, session_id: str) -> bool:
-        """Delete a session"""
-        if session_id in self.sessions:
-            del self.sessions[session_id]
-            return True
-        return False
-
-    def list_active_sessions(self) -> list[dict]:
-        """Get list of all active sessions (debug/admin only)"""
-        # TODO: Add authentication/authorization before exposing this in production
-        return [session.to_dict() for session in self.sessions.values()]
-
-
-# Global session manager instance
-# TODO: Make this thread-safe and handle concurrent access
-session_manager = SessionManager()

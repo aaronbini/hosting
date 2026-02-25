@@ -11,7 +11,7 @@ interface DetailItemProps {
   value: string
 }
 
-export default function EventDataPanel({ eventData, completionScore, isComplete }: Props) {
+export default function EventDataPanel({ eventData, completionScore }: Props) {
   const getCompletionColor = () => {
     if (completionScore >= 0.8) return 'bg-green-500'
     if (completionScore >= 0.5) return 'bg-yellow-500'
@@ -23,6 +23,7 @@ export default function EventDataPanel({ eventData, completionScore, isComplete 
     recipe_confirmation: 'Confirming Recipes',
     selecting_output: 'Choosing Output',
     agent_running: 'Calculating...',
+    complete: 'Planning Complete',
   }
 
   return (
@@ -31,29 +32,40 @@ export default function EventDataPanel({ eventData, completionScore, isComplete 
 
       {/* Conversation Stage */}
       <div className="mb-4">
-        <span className="text-xs font-semibold text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
+        <span className={`text-xs font-semibold px-2 py-1 rounded ${
+          eventData.conversation_stage === 'complete'
+            ? 'text-green-700 bg-green-100'
+            : 'text-indigo-600 bg-indigo-50'
+        }`}>
           {stageLabels[eventData.conversation_stage] || eventData.conversation_stage}
         </span>
       </div>
 
       {/* Completion Progress */}
-      <div className="mb-6">
-        <div className="flex justify-between items-center mb-2">
-          <span className="text-sm font-medium text-slate-700">Information Complete</span>
-          <span className="text-sm font-bold text-slate-900">
-            {Math.round(completionScore * 100)}%
-          </span>
+      {eventData.conversation_stage === 'complete' ? (
+        <div className="mb-6 p-3 bg-green-50 border border-green-200 rounded-lg">
+          <p className="text-sm font-semibold text-green-700">Event planning complete!</p>
+          <p className="text-xs text-green-600 mt-1">Your shopping list has been delivered.</p>
         </div>
-        <div className="w-full bg-slate-200 rounded-full h-2">
-          <div
-            className={`h-2 rounded-full transition-all ${getCompletionColor()}`}
-            style={{ width: `${completionScore * 100}%` }}
-          ></div>
+      ) : (
+        <div className="mb-6">
+          <div className="flex justify-between items-center mb-2">
+            <span className="text-sm font-medium text-slate-700">Information Complete</span>
+            <span className="text-sm font-bold text-slate-900">
+              {Math.round(completionScore * 100)}%
+            </span>
+          </div>
+          <div className="w-full bg-slate-200 rounded-full h-2">
+            <div
+              className={`h-2 rounded-full transition-all ${getCompletionColor()}`}
+              style={{ width: `${completionScore * 100}%` }}
+            ></div>
+          </div>
+          {completionScore >= 1.0 && (
+            <p className="text-sm text-green-600 font-medium mt-2">Ready to plan!</p>
+          )}
         </div>
-        {isComplete && (
-          <p className="text-sm text-green-600 font-medium mt-2">Ready to plan!</p>
-        )}
-      </div>
+      )}
 
       {/* Event Details */}
       <div className="space-y-4">
@@ -137,7 +149,13 @@ export default function EventDataPanel({ eventData, completionScore, isComplete 
                   {recipe.status === 'named' && recipe.awaiting_user_input && (
                     <span className="text-xs text-amber-600 ml-4">needs recipe</span>
                   )}
-                  {recipe.status === 'complete' && (
+                  {recipe.status === 'named' && !recipe.awaiting_user_input && recipe.preparation_method !== 'store_bought' && (
+                    <span className="text-xs text-amber-600 ml-4">needs ingredients</span>
+                  )}
+                  {(
+                    (recipe.preparation_method === 'store_bought' && recipe.status !== 'placeholder') ||
+                    (recipe.status === 'complete' && eventData.conversation_stage !== 'gathering')
+                  ) && (
                     <span className="text-xs text-green-600 ml-4">✓ ready</span>
                   )}
                 </li>

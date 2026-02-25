@@ -52,8 +52,42 @@ export interface EventData {
   progress: Record<string, unknown>
 }
 
+export interface OutputOption {
+  value: string
+  label: string
+  description: string
+}
+
+export interface User {
+  id: string
+  email: string
+  name: string
+  picture?: string
+}
+
 export interface Message {
   role: 'user' | 'assistant'
   content: string
   timestamp: Date
+  shoppingList?: any
+  outputOptions?: OutputOption[]
+}
+
+export interface SavedPlanSummary {
+  id: string
+  name: string
+  created_at: string
+  event_data: {
+    total_guests?: number
+    event_type?: string
+    event_date?: string
+    meal_type?: string
+    meal_plan?: { recipes: { name: string }[] }
+  }
+}
+
+export interface SavedPlan extends SavedPlanSummary {
+  shopping_list: any | null
+  formatted_output: string | null
+  formatted_recipes_output: string | null
 }

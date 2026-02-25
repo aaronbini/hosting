@@ -1,15 +1,17 @@
 import { useState, useCallback, useRef } from 'react'
-import { EventData, Message } from '../types'
+import { EventData, Message, OutputOption } from '../types'
 
 type WebSocketMessage =
   | { type: 'stream_start'; data: { completion_score: number; is_complete: boolean; event_data: EventData } }
   | { type: 'stream_chunk'; data: { text: string } }
   | { type: 'stream_end' }
   | { type: 'error'; data: { error: string } }
+  | { type: 'event_data_update'; data: { completion_score: number; is_complete: boolean; event_data: EventData } }
   | { type: 'agent_progress'; stage: string; message: string }
   | { type: 'agent_review'; stage: string; message: string; shopping_list?: unknown }
-  | { type: 'agent_complete'; stage: string; formatted_output?: string; google_sheet_url?: string | null; google_tasks?: { url: string; list_title: string } | null }
+  | { type: 'agent_complete'; stage: string; formatted_output?: string; formatted_recipes_output?: string | null; google_sheet_url?: string | null; google_tasks?: { url: string; list_title: string } | null }
   | { type: 'agent_error'; stage: string; message: string }
+  | { type: 'output_selection'; options: OutputOption[] }
 
 interface UseChatReturn {
   messages: Message[]
@@ -19,57 +21,41 @@ interface UseChatReturn {
   completionScore: number
   isComplete: boolean
   isAwaitingReview: boolean
+  excludedItems: Set<string>
+  toggleExcludedItem: (name: string) => void
   connect: () => WebSocket | undefined
   sendMessage: (message: string) => void
   sendMessageRest: (message: string) => Promise<void>
   approveShoppingList: () => void
+  selectOutputs: (formats: string[]) => void
   isConnected: boolean
 }
 
-/**
- * Hook for managing WebSocket chat connection
- *
- * TODO: Implement WebSocket reconnection logic
- * TODO: Handle connection timeouts
- * TODO: Implement message queuing for offline scenarios
- */
-export const useChat = (sessionId: string): UseChatReturn => {
-  const [messages, setMessages] = useState<Message[]>([])
+interface UseChatOptions {
+  initialMessages?: Message[]
+  initialEventData?: EventData | null
+  initialCompletionScore?: number
+  initialIsComplete?: boolean
+}
+
+export const useChat = (sessionId: string, options: UseChatOptions = {}): UseChatReturn => {
+  const {
+    initialMessages = [],
+    initialEventData = null,
+    initialCompletionScore = 0,
+    initialIsComplete = false,
+  } = options
+  const [messages, setMessages] = useState<Message[]>(initialMessages)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [eventData, setEventData] = useState<EventData | null>(null)
-  const [completionScore, setCompletionScore] = useState(0)
-  const [isComplete, setIsComplete] = useState(false)
+  const [eventData, setEventData] = useState<EventData | null>(initialEventData)
+  const [completionScore, setCompletionScore] = useState(initialCompletionScore)
+  const [isComplete, setIsComplete] = useState(initialIsComplete)
   const [ws, setWs] = useState<WebSocket | null>(null)
   const [isAwaitingReview, setIsAwaitingReview] = useState(false)
+  const [excludedItems, setExcludedItems] = useState<Set<string>>(new Set())
   const isStreamingRef = useRef(false)
   const pendingEventDataRef = useRef<EventData | null>(null)
-
-  const formatShoppingListForChat = (shoppingList: any): string | null => {
-    if (!shoppingList?.grouped || typeof shoppingList.grouped !== 'object') return null
-
-    const lines: string[] = ['Shopping List:']
-    for (const [category, items] of Object.entries(shoppingList.grouped)) {
-      const label = String(category).replace(/_/g, ' ')
-      lines.push(`\n${label.charAt(0).toUpperCase()}${label.slice(1)}`)
-
-      if (Array.isArray(items)) {
-        for (const item of items) {
-          const name = item?.name ?? 'Item'
-          const qty = item?.total_quantity ?? item?.quantity
-          const unit = item?.unit?.value ?? item?.unit
-          const qtyStr = typeof qty === 'number'
-            ? `${Math.ceil(qty)}`
-            : (qty != null ? String(qty) : '')
-          const unitStr = unit ? ` ${unit}` : ''
-          const detail = qtyStr ? `: ${qtyStr}${unitStr}` : ''
-          lines.push(`- ${name}${detail}`)
-        }
-      }
-    }
-
-    return lines.join('\n')
-  }
 
   const connect = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -125,6 +111,10 @@ export const useChat = (sessionId: string): UseChatReturn => {
           }
           isStreamingRef.current = false
           setIsLoading(false)
+        } else if (data.type === 'event_data_update') {
+          setEventData(data.data.event_data)
+          setCompletionScore(data.data.completion_score)
+          setIsComplete(data.data.is_complete)
         } else if (data.type === 'error') {
           setError(data.data.error)
           setIsLoading(false)
@@ -135,22 +125,21 @@ export const useChat = (sessionId: string): UseChatReturn => {
             timestamp: new Date()
           }])
         } else if (data.type === 'agent_review') {
-          const listText = formatShoppingListForChat(data.shopping_list)
-          const content = listText
-            ? `${data.message}\n\n${listText}`
-            : data.message
           setMessages(prev => [...prev, {
             role: 'assistant',
-            content,
+            content: data.message,
+            shoppingList: data.shopping_list ?? null,
             timestamp: new Date()
           }])
+          setExcludedItems(new Set())
           setIsAwaitingReview(true)
           setIsLoading(false)
         } else if (data.type === 'agent_complete') {
           const extraLinks: string[] = []
           if (data.google_sheet_url) extraLinks.push(`Google Sheet: ${data.google_sheet_url}`)
           if (data.google_tasks) extraLinks.push(`[Open Google Tasks](${data.google_tasks.url}) — look for the list named **${data.google_tasks.list_title}**`)
-          const content = [data.formatted_output || 'Your results are ready.', ...extraLinks]
+          const conclusion = "I hope you enjoy your gathering! Let me know if there are any other events you need assistance with."
+          const content = [data.formatted_output || 'Your results are ready.', data.formatted_recipes_output, ...extraLinks, conclusion]
             .filter(Boolean)
             .join('\n\n')
           setMessages(prev => [...prev, {
@@ -163,6 +152,14 @@ export const useChat = (sessionId: string): UseChatReturn => {
         } else if (data.type === 'agent_error') {
           setError(data.message || 'Agent error occurred')
           setIsAwaitingReview(false)
+          setIsLoading(false)
+        } else if (data.type === 'output_selection') {
+          setMessages(prev => [...prev, {
+            role: 'assistant',
+            content: '',
+            outputOptions: data.options,
+            timestamp: new Date()
+          }])
           setIsLoading(false)
         }
       }
@@ -243,10 +240,25 @@ export const useChat = (sessionId: string): UseChatReturn => {
     }
   }, [sessionId])
 
+  const toggleExcludedItem = useCallback((name: string) => {
+    setExcludedItems(prev => {
+      const next = new Set(prev)
+      next.has(name) ? next.delete(name) : next.add(name)
+      return next
+    })
+  }, [])
+
   const approveShoppingList = useCallback(() => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ type: 'approve', excluded_items: [...excludedItems] }))
     setIsAwaitingReview(false)
-    ws.send(JSON.stringify({ type: 'approve' }))
+    setExcludedItems(new Set())
+  }, [ws, excludedItems])
+
+  const selectOutputs = useCallback((formats: string[]) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    setIsLoading(true)
+    ws.send(JSON.stringify({ type: 'select_outputs', data: formats }))
   }, [ws])
 
   return {
@@ -257,10 +269,13 @@ export const useChat = (sessionId: string): UseChatReturn => {
     completionScore,
     isComplete,
     isAwaitingReview,
+    excludedItems,
+    toggleExcludedItem,
     connect,
     sendMessage,
     sendMessageRest,
     approveShoppingList,
+    selectOutputs,
     isConnected: ws?.readyState === WebSocket.OPEN
   }
 }

@@ -2,14 +2,19 @@ import { RefObject } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Message } from '../types'
+import ShoppingListReview from './ShoppingListReview'
+import OutputOptionsCard from './OutputOptionsCard'
 
 interface Props {
   messages: Message[]
   isLoading: boolean
   messagesEndRef: RefObject<HTMLDivElement>
+  excludedItems: Set<string>
+  onToggleExcluded: (name: string) => void
+  onSelectOutputs: (formats: string[]) => void
 }
 
-export default function ChatMessages({ messages, isLoading, messagesEndRef }: Props) {
+export default function ChatMessages({ messages, isLoading, messagesEndRef, excludedItems, onToggleExcluded, onSelectOutputs }: Props) {
   const lastMsg = messages[messages.length - 1]
   const isStreaming = isLoading && lastMsg?.role === 'assistant'
 
@@ -32,29 +37,46 @@ export default function ChatMessages({ messages, isLoading, messagesEndRef }: Pr
               key={idx}
               className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
-              <div
-                className={`max-w-md lg:max-w-lg px-4 py-3 rounded-lg ${
-                  msg.role === 'user'
-                    ? 'bg-indigo-600 text-white rounded-br-none'
-                    : 'bg-white text-slate-900 border border-slate-200 rounded-bl-none'
-                }`}
-              >
-                <div
-                  className={`text-sm chat-markdown ${msg.role === 'user' ? 'chat-markdown--user' : ''}`}
-                >
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {msg.content}
-                  </ReactMarkdown>
-                  {isLastAssistant && (
-                    <span className="inline-block w-0.5 h-3.5 bg-slate-500 ml-0.5 align-middle animate-pulse" />
-                  )}
-                </div>
-                {msg.timestamp && (
-                  <p className={`text-xs mt-1 ${
-                    msg.role === 'user' ? 'text-indigo-100' : 'text-slate-400'
-                  }`}>
-                    {msg.timestamp.toLocaleTimeString()}
-                  </p>
+              <div className={`flex flex-col gap-2 ${msg.role === 'user' ? 'items-end' : 'items-start'} max-w-lg w-full`}>
+                {msg.content && (
+                  <div
+                    className={`max-w-md lg:max-w-lg px-4 py-3 rounded-lg ${
+                      msg.role === 'user'
+                        ? 'bg-indigo-600 text-white rounded-br-none'
+                        : 'bg-white text-slate-900 border border-slate-200 rounded-bl-none'
+                    }`}
+                  >
+                    <div
+                      className={`text-sm chat-markdown ${msg.role === 'user' ? 'chat-markdown--user' : ''}`}
+                    >
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {msg.content}
+                      </ReactMarkdown>
+                      {isLastAssistant && (
+                        <span className="inline-block w-0.5 h-3.5 bg-slate-500 ml-0.5 align-middle animate-pulse" />
+                      )}
+                    </div>
+                    {msg.timestamp && (
+                      <p className={`text-xs mt-1 ${
+                        msg.role === 'user' ? 'text-indigo-100' : 'text-slate-400'
+                      }`}>
+                        {msg.timestamp.toLocaleTimeString()}
+                      </p>
+                    )}
+                  </div>
+                )}
+                {msg.shoppingList && (
+                  <ShoppingListReview
+                    shoppingList={msg.shoppingList}
+                    excludedItems={excludedItems}
+                    onToggle={onToggleExcluded}
+                  />
+                )}
+                {msg.outputOptions && (
+                  <OutputOptionsCard
+                    options={msg.outputOptions}
+                    onConfirm={onSelectOutputs}
+                  />
                 )}
               </div>
             </div>
