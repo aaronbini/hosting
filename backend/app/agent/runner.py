@@ -59,6 +59,7 @@ async def run_agent(
     ai_service: GeminiService,
     existing_state: Optional[AgentState] = None,
     tasks_service=None,
+    sheets_service=None,
 ) -> AgentState:
     """
     Run the full agent pipeline for a session.
@@ -239,7 +240,7 @@ async def run_agent(
         ]
 
         if OutputFormat.GOOGLE_SHEET in output_formats:
-            delivery_tasks.append(create_google_sheet(state))
+            delivery_tasks.append(create_google_sheet(state, sheets_service))
         if OutputFormat.GOOGLE_TASKS in output_formats:
             delivery_tasks.append(create_google_tasks(state, tasks_service))
 
