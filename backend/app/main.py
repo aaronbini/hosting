@@ -80,6 +80,7 @@ app.add_middleware(
 # ============================================================================
 
 GOOGLE_TASKS_SCOPE = "https://www.googleapis.com/auth/tasks"
+GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 _OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
 _OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
 _OAUTH_REDIRECT_URI = os.getenv(
@@ -92,7 +93,7 @@ _OAUTH_REDIRECT_URI = os.getenv(
 
 
 def _build_oauth_flow():
-    """Build a Google OAuth Flow for the Tasks permission (existing flow)."""
+    """Build a Google OAuth Flow covering Tasks and Sheets scopes."""
     from google_auth_oauthlib.flow import Flow
 
     return Flow.from_client_config(
@@ -104,7 +105,7 @@ def _build_oauth_flow():
                 "token_uri": "https://oauth2.googleapis.com/token",
             }
         },
-        scopes=[GOOGLE_TASKS_SCOPE],
+        scopes=[GOOGLE_TASKS_SCOPE, GOOGLE_SHEETS_SCOPE],
         redirect_uri=_OAUTH_REDIRECT_URI,
     )
 
@@ -679,12 +680,17 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 # If we just transitioned to agent_running, hand off to the agent
                 if session.event_data.conversation_stage == "agent_running":
                     from app.agent.runner import run_agent
+                    from app.services.sheets_service import SheetsService
                     from app.services.tasks_service import TasksService
 
+                    needs_google_output = (
+                        OutputFormat.GOOGLE_TASKS in session.event_data.output_formats
+                        or OutputFormat.GOOGLE_SHEET in session.event_data.output_formats
+                    )
                     needs_google_auth = (
                         _OAUTH_CLIENT_ID
                         and _OAUTH_CLIENT_SECRET
-                        and OutputFormat.GOOGLE_TASKS in session.event_data.output_formats
+                        and needs_google_output
                         and not session.google_credentials
                     )
                     if needs_google_auth:
@@ -715,6 +721,10 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     if _OAUTH_CLIENT_ID and _OAUTH_CLIENT_SECRET and OutputFormat.GOOGLE_TASKS in session.event_data.output_formats:
                         tasks_service = TasksService.from_token_dict(session.google_credentials)
 
+                    sheets_service = None
+                    if _OAUTH_CLIENT_ID and _OAUTH_CLIENT_SECRET and OutputFormat.GOOGLE_SHEET in session.event_data.output_formats:
+                        sheets_service = SheetsService.from_token_dict(session.google_credentials)
+
                     session.agent_state = await run_agent(
                         websocket,
                         session.event_data,
@@ -722,6 +732,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         ai_service,
                         existing_state=session.agent_state,
                         tasks_service=tasks_service,
+                        sheets_service=sheets_service,
                     )
 
                     session.event_data.conversation_stage = "complete"
@@ -965,6 +976,22 @@ async def upload_recipe(
 # ============================================================================
 
 
+@app.get("/api/auth/google/status")
+async def google_auth_status(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns whether the session has Google OAuth credentials stored.
+    Used by the frontend to poll for auth completion as a fallback to postMessage.
+    """
+    await _require_session_owner(session_id, current_user, db)
+    row = await db_session_manager.get_session_row(session_id, db)
+    session = db_session_manager._row_to_session_data(row) if row else None
+    return {"connected": bool(session and session.google_credentials)}
+
+
 @app.get("/api/auth/google/start")
 async def google_auth_start(
     session_id: str,
@@ -1011,6 +1038,7 @@ async def google_auth_callback(
         return HTMLResponse("<script>window.close();</script>", status_code=400)
 
     try:
+        os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
         flow = _build_oauth_flow()
         flow.fetch_token(code=code)
         creds = flow.credentials

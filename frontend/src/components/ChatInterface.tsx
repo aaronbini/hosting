@@ -45,9 +45,11 @@ export default function ChatInterface({
   const connectionAttempted = useRef(false)
   const [isGoogleConnected, setIsGoogleConnected] = useState(false)
 
-  const needsGoogleAuth = 
-    eventData?.output_formats?.includes('google_tasks') &&
-    !isGoogleConnected
+  const needsGoogleOutput =
+    eventData?.output_formats?.includes('google_tasks') ||
+    eventData?.output_formats?.includes('google_sheet')
+
+  const needsGoogleAuth = needsGoogleOutput && !isGoogleConnected
 
   const handleConnectGoogle = useCallback(async () => {
     const res = await fetch(`/api/auth/google/start?session_id=${sessionId}`)
@@ -135,15 +137,15 @@ export default function ChatInterface({
           />
         )}
 
-        {/* Connect Google — visible during output selection when Google Tasks is chosen */}
+        {/* Connect Google — visible when a Google output is selected and not yet authenticated */}
         {needsGoogleAuth && (
           <div className="border-t border-slate-200 bg-blue-50 px-4 py-3 flex items-center gap-3">
             <div className="flex-1">
               <p className="text-sm text-slate-600">
-                Google Tasks selected — connect your Google account to deliver the list.
+                Google output selected — connect your Google account to continue.
               </p>
               <p className="text-xs text-slate-400 mt-0.5">
-                Only used to create a new task list. Cannot read, edit, or delete your existing tasks.
+                Only used to create your Tasks list or Sheet. Cannot read, edit, or delete existing data.
               </p>
             </div>
             <button
@@ -154,8 +156,7 @@ export default function ChatInterface({
             </button>
           </div>
         )}
-        {eventData?.output_formats?.includes('google_tasks') &&
-          isGoogleConnected && (
+        {needsGoogleOutput && isGoogleConnected && (
           <div className="border-t border-slate-200 bg-green-50 px-4 py-3">
             <p className="text-sm text-green-700">✓ Google account connected</p>
           </div>

@@ -277,8 +277,7 @@ class GeminiService:
                               Does this look right, or would you like to swap in your own recipe for any of these?
                               You can paste a URL, upload a file, or describe the ingredients.
 
-                              Also, would you like the full recipe (with step-by-step instructions) for any of
-                              these dishes? Just let me know which ones and I'll walk you through them."
+                              Full recipes (with complete step-by-step instructions) will be provided at the end — right now we're just confirming ingredient lists.
 
                               ON SUBSEQUENT TURNS (no last_generated_recipes):
                               The user is reviewing or correcting dishes. Handle their feedback:
@@ -328,6 +327,9 @@ class GeminiService:
                                 ✓ Accept user corrections gracefully
                                 ✓ Always be explicit about which dish you're referring to when asking about uploads
                                 ✗ Do NOT re-open the menu discussion
+                                ✗ Do NOT ask about output format or how the user wants their shopping list
+                                  delivered — the system handles this automatically once all ingredients
+                                  are confirmed. Never mention Google Sheet, Google Tasks, or in-chat list here.
 
                             IF conversation_stage == "selecting_output":
 
@@ -699,6 +701,10 @@ class GeminiService:
                 response_schema=_strip_additional_properties(ExtractionResult.model_json_schema()),
             ),
         )
+
+        if response.parsed is None:
+            logger.warning("extract_event_data: Gemini returned None (empty/invalid JSON); using empty ExtractionResult")
+            return ExtractionResult()
 
         result = ExtractionResult.model_validate(response.parsed)
         logger.info(

@@ -275,15 +275,28 @@ async def apply_corrections(
 # ---------------------------------------------------------------------------
 
 
-async def create_google_sheet(state: AgentState) -> AgentState:
+async def create_google_sheet(state: AgentState, sheets_service=None) -> AgentState:
     """
-    Stub: create a Google Sheet from the shopping list and return its URL.
-    Pending Google Sheets API auth setup.
+    Create a formula-driven Google Sheet from the shopping list and event data.
+    Requires a SheetsService instance (built from session OAuth credentials).
+    If sheets_service is None (no credentials yet), skips gracefully.
     """
-    # TODO: implement once Google API credentials are configured
     logger.info("[STEP 5a] Starting create_google_sheet")
-    state.google_sheet_url = None
-    logger.info("[STEP 5a] create_google_sheet: stub — not yet implemented")
+    if not sheets_service:
+        logger.warning("[STEP 5a] No SheetsService provided — skipping")
+        state.google_sheet_url = None
+        return state
+
+    raw_date = state.event_data.event_date or datetime.date.today().isoformat()
+    try:
+        event_date = datetime.date.fromisoformat(raw_date).strftime("%m-%d-%Y")
+    except ValueError:
+        event_date = raw_date
+    title = f"Dinner Party - {event_date}"
+
+    url = await sheets_service.create_party_sheet(state, title)
+    state.google_sheet_url = url
+    logger.info("[STEP 5a] Sheet created: %s", url)
     return state
 
 
