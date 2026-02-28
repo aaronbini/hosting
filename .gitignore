@@ -70,6 +70,8 @@ Thumbs.db       # Windows
 
 #local files
 notes.txt
+local/*
 
 #Claude Code files that don't need to be tracked
 .claude/
+DEPLOYMENT.md

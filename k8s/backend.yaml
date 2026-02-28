@@ -1,0 +1,200 @@
+# ============================================================
+# BackendConfig — WebSocket timeout and session affinity
+# ============================================================
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: hosting-helper-backend-config
+  namespace: default
+spec:
+  # WebSocket connections can be long-lived during agent runs.
+  # GKE Ingress default is 30s — raise to 3600s (1 hour).
+  timeoutSec: 3600
+  connectionDraining:
+    drainingTimeoutSec: 60
+  # Session affinity ensures WebSocket reconnects hit the same pod.
+  sessionAffinity:
+    affinityType: "GENERATED_COOKIE"
+    affinityCookieTtlSec: 3600
+
+---
+# ============================================================
+# Deployment
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hosting-helper-backend
+  namespace: default
+  labels:
+    app: hosting-helper-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hosting-helper-backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: hosting-helper-backend
+    spec:
+      serviceAccountName: hosting-helper-backend
+      containers:
+        # ---- FastAPI application ----
+        - name: api
+          image: BACKEND_IMAGE_PLACEHOLDER
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: hosting-helper-secrets
+                  key: DATABASE_URL
+            - name: GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hosting-helper-secrets
+                  key: GOOGLE_API_KEY
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hosting-helper-secrets
+                  key: JWT_SECRET_KEY
+            - name: GOOGLE_OAUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: hosting-helper-secrets
+                  key: GOOGLE_OAUTH_CLIENT_ID
+            - name: GOOGLE_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: hosting-helper-secrets
+                  key: GOOGLE_OAUTH_CLIENT_SECRET
+            - name: GOOGLE_OAUTH_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: hosting-helper-secrets
+                  key: GOOGLE_OAUTH_REDIRECT_URI
+            - name: GOOGLE_LOGIN_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: hosting-helper-secrets
+                  key: GOOGLE_LOGIN_REDIRECT_URI
+            - name: FRONTEND_URL
+              valueFrom:
+                secretKeyRef:
+                  name: hosting-helper-secrets
+                  key: FRONTEND_URL
+            - name: COOKIE_DOMAIN
+              valueFrom:
+                secretKeyRef:
+                  name: hosting-helper-secrets
+                  key: COOKIE_DOMAIN
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+
+        # ---- Cloud SQL Auth Proxy sidecar ----
+        # Binds to 127.0.0.1:5432 — DATABASE_URL must use 127.0.0.1 as host
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            - "--private-ip"
+            # Format: PROJECT_ID:REGION:INSTANCE_NAME — replace before applying
+            - "lameduck-486519:us-west1:hosting-helper-db"
+          securityContext:
+            runAsNonRoot: true
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+
+---
+# ============================================================
+# Service — ClusterIP, linked to BackendConfig for WebSocket
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: hosting-helper-backend-svc
+  namespace: default
+  annotations:
+    cloud.google.com/backend-config: '{"default": "hosting-helper-backend-config"}'
+spec:
+  type: ClusterIP
+  selector:
+    app: hosting-helper-backend
+  ports:
+    - port: 80
+      targetPort: 8000
+      protocol: TCP
+
+---
+# ============================================================
+# ManagedCertificate — api.hostinghelper.co
+# ============================================================
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: hosting-helper-api-cert
+  namespace: default
+spec:
+  domains:
+    - api.hostinghelper.co
+
+---
+# ============================================================
+# Ingress — GKE HTTP(S) Load Balancer
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hosting-helper-ingress
+  namespace: default
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    networking.gke.io/managed-certificates: "hosting-helper-api-cert"
+    # Static IP created via: gcloud compute addresses create hosting-helper-api-ip --global
+    kubernetes.io/ingress.global-static-ip-name: "hosting-helper-api-ip"
+    kubernetes.io/ingress.allow-http: "false"
+spec:
+  rules:
+    - host: api.hostinghelper.co
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hosting-helper-backend-svc
+                port:
+                  number: 80

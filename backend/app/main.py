@@ -35,6 +35,7 @@ from app.services.session_manager import SessionData
 load_dotenv(override=True)
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5174")
+COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN") or None  # e.g. ".yourdomain.com" in production
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -59,8 +60,8 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app
 app = FastAPI(
-    title="Food Event Planning Assistant",
-    description="AI-powered assistant for planning food events",
+    title="Hosting Helper API",
+    description="AI-powered assistant for event hosting and meal planning",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -68,7 +69,7 @@ app = FastAPI(
 # Add CORS middleware — explicit origins required when credentials: 'include' is used
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["http://localhost:5173", "http://localhost:3000", FRONTEND_URL],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -203,6 +204,10 @@ def apply_extraction(session: SessionData, extraction: ExtractionResult) -> None
     # 7. Stage transitions
     if event_data.conversation_stage == "gathering" and event_data.is_complete:
         event_data.conversation_stage = "recipe_confirmation"
+        # Reset so the user must explicitly confirm the AI-generated ingredient lists
+        # before we proceed to output selection (meal_plan.confirmed will be set again
+        # when the user says "yes everything looks good" during recipe_confirmation).
+        event_data.meal_plan.confirmed = False
     elif event_data.conversation_stage == "recipe_confirmation":
         if event_data.meal_plan.is_complete:
             event_data.conversation_stage = "selecting_output"
@@ -333,8 +338,9 @@ async def auth_callback(
         key="access_token",
         value=token,
         httponly=True,
-        secure=False,  # Set to True in production with HTTPS
+        secure=FRONTEND_URL.startswith("https"),
         samesite="lax",
+        domain=COOKIE_DOMAIN,
         max_age=60 * 60 * 24 * 7,  # 7 days
     )
     response.delete_cookie("login_state")
@@ -356,7 +362,7 @@ async def get_me(current_user: User = Depends(get_current_user)):
 async def logout():
     """Clear the auth cookie."""
     response = JSONResponse({"ok": True})
-    response.delete_cookie("access_token")
+    response.delete_cookie("access_token", domain=COOKIE_DOMAIN)
     return response
 
 
@@ -765,6 +771,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                 # When stage is selecting_output, send structured options card
                 if session.event_data.conversation_stage == "selecting_output":
+                    session.event_data.compute_derived_fields()
                     await websocket.send_json({
                         "type": "event_data_update",
                         "data": {

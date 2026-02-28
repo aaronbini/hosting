@@ -1,0 +1,173 @@
+name: Deploy Backend to GKE
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - 'k8s/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  REGION: us-west1
+  ZONE: us-west1-a
+  CLUSTER: hosting-helper
+  AR_HOST: us-west1-docker.pkg.dev
+  AR_REPO: ${{ vars.ARTIFACT_REGISTRY_REPO }}
+  IMAGE_NAME: hosting-helper-backend
+  CLOUD_SQL_INSTANCE: ${{ vars.GCP_PROJECT_ID }}:us-west1:hosting-helper-db
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # Required for Workload Identity Federation
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: >-
+            projects/${{ vars.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: github-actions-deploy@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.AR_HOST }} --quiet
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+          location: ${{ env.ZONE }}
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Build and push Docker image
+        id: build
+        working-directory: backend
+        run: |
+          IMAGE_TAG="${{ env.AR_HOST }}/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          LATEST_TAG="${{ env.AR_HOST }}/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:latest"
+          docker build -t "$IMAGE_TAG" -t "$LATEST_TAG" .
+          docker push "$IMAGE_TAG"
+          docker push "$LATEST_TAG"
+          echo "image=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Sync secrets from Secret Manager to Kubernetes
+        run: |
+          fetch() {
+            gcloud secrets versions access latest --secret="$1" --project="${{ env.PROJECT_ID }}"
+          }
+          kubectl create secret generic hosting-helper-secrets \
+            --namespace=default \
+            --from-literal=DATABASE_URL="$(fetch DATABASE_URL)" \
+            --from-literal=GOOGLE_API_KEY="$(fetch GOOGLE_API_KEY)" \
+            --from-literal=JWT_SECRET_KEY="$(fetch JWT_SECRET_KEY)" \
+            --from-literal=GOOGLE_OAUTH_CLIENT_ID="$(fetch GOOGLE_OAUTH_CLIENT_ID)" \
+            --from-literal=GOOGLE_OAUTH_CLIENT_SECRET="$(fetch GOOGLE_OAUTH_CLIENT_SECRET)" \
+            --from-literal=GOOGLE_OAUTH_REDIRECT_URI="$(fetch GOOGLE_OAUTH_REDIRECT_URI)" \
+            --from-literal=GOOGLE_LOGIN_REDIRECT_URI="$(fetch GOOGLE_LOGIN_REDIRECT_URI)" \
+            --from-literal=FRONTEND_URL="$(fetch FRONTEND_URL)" \
+            --from-literal=COOKIE_DOMAIN="$(fetch COOKIE_DOMAIN)" \
+            --save-config \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+      - name: Run Alembic migrations
+        run: |
+          JOB_NAME="alembic-migrate-${{ github.run_id }}"
+          kubectl apply -f - <<EOF
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB_NAME}
+            namespace: default
+          spec:
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                serviceAccountName: hosting-helper-backend
+                restartPolicy: Never
+                containers:
+                  - name: migrate
+                    image: ${{ steps.build.outputs.image }}
+                    command: ["sh", "-c", "cd /app && python -m alembic upgrade head"]
+                    env:
+                      - name: DATABASE_URL
+                        valueFrom:
+                          secretKeyRef:
+                            name: hosting-helper-secrets
+                            key: DATABASE_URL
+                    resources:
+                      requests:
+                        cpu: "50m"
+                        memory: "128Mi"
+                      limits:
+                        cpu: "200m"
+                        memory: "256Mi"
+                  - name: cloud-sql-proxy
+                    image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2
+                    args:
+                      - "--structured-logs"
+                      - "--port=5432"
+                      - "--private-ip"
+                      - "${{ env.CLOUD_SQL_INSTANCE }}"
+                    securityContext:
+                      runAsNonRoot: true
+                    resources:
+                      requests:
+                        cpu: "20m"
+                        memory: "32Mi"
+                      limits:
+                        cpu: "100m"
+                        memory: "64Mi"
+          EOF
+          MIGRATE_POD=""
+          for i in $(seq 1 30); do
+            MIGRATE_POD=$(kubectl get pods -n default -l "job-name=${JOB_NAME}" \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+            [ -n "${MIGRATE_POD}" ] && break
+            sleep 3
+          done
+          [ -z "${MIGRATE_POD}" ] && { echo "ERROR: migration pod never started"; exit 1; }
+          ELAPSED=0
+          while [ "${ELAPSED}" -lt 300 ]; do
+            EXIT_CODE=$(kubectl get pod "${MIGRATE_POD}" -n default \
+              -o jsonpath='{.status.containerStatuses[?(@.name=="migrate")].state.terminated.exitCode}' \
+              2>/dev/null || true)
+            if [ -n "${EXIT_CODE}" ]; then
+              [ "${EXIT_CODE}" = "0" ] && { echo "Migration succeeded"; break; }
+              echo "ERROR: migration failed (exit code: ${EXIT_CODE})"
+              kubectl logs "${MIGRATE_POD}" -c migrate -n default || true
+              exit 1
+            fi
+            sleep 5
+            ELAPSED=$((ELAPSED + 5))
+          done
+          [ "${ELAPSED}" -ge 300 ] && { echo "ERROR: migration timed out"; exit 1; }
+          kubectl delete job "${JOB_NAME}" -n default --ignore-not-found
+
+      - name: Deploy to GKE
+        run: |
+          sed \
+            "s|BACKEND_IMAGE_PLACEHOLDER|${{ steps.build.outputs.image }}|g; \
+             s|YOUR_PROJECT_ID|${{ env.PROJECT_ID }}|g" \
+            k8s/backend.yaml | kubectl apply -f -
+          kubectl rollout restart deployment/hosting-helper-backend --namespace=default
+          kubectl rollout status deployment/hosting-helper-backend \
+            --timeout=300s --namespace=default
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -l app=hosting-helper-backend
+          kubectl get ingress hosting-helper-ingress
