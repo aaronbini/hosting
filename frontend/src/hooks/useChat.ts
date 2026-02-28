@@ -57,6 +57,7 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
   const [excludedItems, setExcludedItems] = useState<Set<string>>(new Set())
   const isStreamingRef = useRef(false)
   const pendingEventDataRef = useRef<EventData | null>(null)
+  const pendingMessageRef = useRef<string | null>(null)
 
   const connect = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -71,6 +72,10 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
       socket.onopen = () => {
         console.log('WebSocket connected')
         setError(null)
+        if (pendingMessageRef.current) {
+          socket.send(JSON.stringify({ type: 'message', data: pendingMessageRef.current }))
+          pendingMessageRef.current = null
+        }
       }
 
       socket.onmessage = (event: MessageEvent) => {
@@ -186,7 +191,7 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
   }, [sessionId])
 
   const sendMessage = useCallback((message: string) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
       setError('Not connected')
       return
     }
@@ -199,6 +204,11 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
       content: message,
       timestamp: new Date()
     }])
+
+    if (ws.readyState === WebSocket.CONNECTING) {
+      pendingMessageRef.current = message
+      return
+    }
 
     ws.send(JSON.stringify({
       type: 'message',

@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { Recipe } from '../types'
+import { API_BASE } from '../api'
+
 
 interface UploadResult {
   success: boolean
@@ -42,7 +44,7 @@ export default function RecipeUploadPanel({ sessionId, recipes, onUploadComplete
 
     try {
       const res = await fetch(
-        `/api/sessions/${sessionId}/upload-recipe?dish_name=${encodeURIComponent(selectedDish)}`,
+        `${API_BASE}/api/sessions/${sessionId}/upload-recipe?dish_name=${encodeURIComponent(selectedDish)}`,
         { method: 'POST', body: formData }
       )
 
