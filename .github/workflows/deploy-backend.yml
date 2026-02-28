@@ -134,10 +134,10 @@ jobs:
                             key: DATABASE_URL
                     resources:
                       requests:
-                        cpu: "50m"
+                        cpu: "1m"
                         memory: "128Mi"
                       limits:
-                        cpu: "200m"
+                        cpu: "500m"
                         memory: "256Mi"
                   - name: cloud-sql-proxy
                     image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2
@@ -150,10 +150,10 @@ jobs:
                       runAsNonRoot: true
                     resources:
                       requests:
-                        cpu: "20m"
+                        cpu: "1m"
                         memory: "32Mi"
                       limits:
-                        cpu: "100m"
+                        cpu: "200m"
                         memory: "64Mi"
           EOF
           MIGRATE_POD=""
