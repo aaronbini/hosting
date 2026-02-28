@@ -21,9 +21,33 @@ env:
   CLOUD_SQL_INSTANCE: ${{ vars.GCP_PROJECT_ID }}:us-west1:hosting-helper-db
 
 jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        working-directory: backend
+        run: uv sync --frozen
+
+      - name: Run tests
+        working-directory: backend
+        run: uv run pytest -x -q
+
   deploy:
     name: Build and Deploy
     runs-on: ubuntu-latest
+    needs: test
     permissions:
       contents: read
       id-token: write  # Required for Workload Identity Federation
@@ -36,7 +60,7 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: >-
-            projects/${{ vars.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-actions/providers/github
+            projects/${{ vars.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider
           service_account: github-actions-deploy@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com
 
       - name: Set up Cloud SDK
