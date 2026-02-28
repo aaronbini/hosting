@@ -5,6 +5,8 @@ import ChatInput from './ChatInput'
 import EventDataPanel from './EventDataPanel'
 import RecipeUploadPanel from './RecipeUploadPanel'
 import type { EventData, Message } from '../types'
+import { API_BASE } from '../api'
+
 
 interface Props {
   sessionId: string
@@ -35,7 +37,6 @@ export default function ChatInterface({
     toggleExcludedItem,
     connect,
     sendMessage,
-    sendMessageRest,
     approveShoppingList,
     selectOutputs,
     isConnected
@@ -52,7 +53,7 @@ export default function ChatInterface({
   const needsGoogleAuth = needsGoogleOutput && !isGoogleConnected
 
   const handleConnectGoogle = useCallback(async () => {
-    const res = await fetch(`/api/auth/google/start?session_id=${sessionId}`)
+    const res = await fetch(`${API_BASE}/api/auth/google/start?session_id=${sessionId}`)
     if (!res.ok) return
     const { auth_url } = await res.json()
     const popup = window.open(auth_url, 'google_oauth', 'width=500,height=650')
@@ -80,11 +81,7 @@ export default function ChatInterface({
   }, [messages])
 
   const handleSendMessage = (message: string) => {
-    if (isConnected) {
-      sendMessage(message)
-    } else {
-      sendMessageRest(message)
-    }
+    sendMessage(message)
   }
 
   return (
