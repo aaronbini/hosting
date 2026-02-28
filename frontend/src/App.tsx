@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { API_BASE } from './api'
 import ChatInterface from './components/ChatInterface'
 import LoginPage from './components/LoginPage'
 import PlansView from './components/PlansView'
@@ -43,7 +44,7 @@ function buildRestoredMessages(
 }
 
 async function fetchSessionInit(sessionId: string): Promise<SessionInit> {
-  const r = await fetch(`/api/sessions/${sessionId}`, { credentials: 'include' })
+  const r = await fetch(`${API_BASE}/api/sessions/${sessionId}`, { credentials: 'include' })
   if (!r.ok) throw new Error('Session not found')
   const data = await r.json()
   const stage: string = data.event_data?.conversation_stage ?? 'gathering'
@@ -57,7 +58,7 @@ async function fetchSessionInit(sessionId: string): Promise<SessionInit> {
 }
 
 async function createNewSession(): Promise<SessionInit> {
-  const r = await fetch('/api/sessions', { method: 'POST', credentials: 'include' })
+  const r = await fetch(`${API_BASE}/api/sessions`, { method: 'POST', credentials: 'include' })
   if (!r.ok) throw new Error('Failed to create session')
   const data = await r.json()
   return {
@@ -93,7 +94,7 @@ function AppHeader({
 }) {
   return (
     <header className="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-6 shrink-0 shadow-sm">
-      <span className="text-lg font-bold text-slate-900 mr-2">Food Event Planner</span>
+      <span className="text-lg font-bold text-slate-900 mr-2">Hosting Helper</span>
       <nav className="flex gap-1">
         {(['planner', 'plans'] as AppView[]).map(v => (
           <button
@@ -133,7 +134,7 @@ function App() {
   const initializingRef = useRef(false)
 
   useEffect(() => {
-    fetch('/api/auth/me', { credentials: 'include' })
+    fetch(`${API_BASE}/api/auth/me`, { credentials: 'include' })
       .then(r => (r.ok ? r.json() : null))
       .then(user => setAuthState(user ?? 'unauthenticated'))
       .catch(() => setAuthState('unauthenticated'))
@@ -145,7 +146,7 @@ function App() {
     initializingRef.current = true
 
     async function initSession() {
-      const r = await fetch('/api/sessions', { credentials: 'include' })
+      const r = await fetch(`${API_BASE}/api/sessions`, { credentials: 'include' })
       const { sessions } = await r.json() as { sessions: { session_id: string; stage: string }[] }
       const active = sessions.find(s => s.stage !== 'complete')
       if (active) return fetchSessionInit(active.session_id)
@@ -167,7 +168,7 @@ function App() {
   }, [])
 
   const handleLogout = useCallback(async () => {
-    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
+    await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', credentials: 'include' })
     setAuthState('unauthenticated')
     setSessionInit(null)
     initializingRef.current = false
@@ -214,6 +215,10 @@ function App() {
       ) : view === 'plans' ? (
         <PlansView onStartPlanning={() => setView('planner')} />
       ) : null}
+
+      <footer className="shrink-0 text-center py-2 text-xs text-slate-400">
+        <a href="/privacy.html" className="hover:text-slate-600 transition-colors">Privacy Policy</a>
+      </footer>
     </div>
   )
 }

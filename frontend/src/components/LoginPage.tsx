@@ -4,13 +4,13 @@ export default function LoginPage() {
       <div className="bg-white rounded-2xl shadow-lg p-10 text-center max-w-md w-full mx-4">
         <div className="mb-6">
           <div className="text-4xl mb-3">🍽️</div>
-          <h1 className="text-2xl font-bold text-slate-900 mb-2">Dinner Party Planner</h1>
+          <h1 className="text-2xl font-bold text-slate-900 mb-2">Hosting Helper</h1>
           <p className="text-slate-500 text-sm">
             Plan the perfect dinner party with AI-powered shopping lists
           </p>
         </div>
         <a
-          href="/api/auth/login"
+          href={`${import.meta.env.VITE_API_BASE_URL ?? ''}/api/auth/login`}
           className="inline-flex items-center gap-3 px-6 py-3 bg-white border border-slate-300 rounded-lg shadow-sm text-slate-700 font-medium hover:bg-slate-50 transition-colors w-full justify-center"
         >
           <svg className="w-5 h-5" viewBox="0 0 24 24">
@@ -34,6 +34,9 @@ export default function LoginPage() {
           Sign in with Google
         </a>
       </div>
+      <p className="mt-6 text-xs text-slate-400">
+        <a href="/privacy.html" className="hover:text-slate-600 transition-colors">Privacy Policy</a>
+      </p>
     </div>
   )
 }

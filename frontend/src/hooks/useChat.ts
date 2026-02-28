@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react'
 import { EventData, Message, OutputOption } from '../types'
+import { API_BASE } from '../api'
 
 type WebSocketMessage =
   | { type: 'stream_start'; data: { completion_score: number; is_complete: boolean; event_data: EventData } }
@@ -59,7 +60,10 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
 
   const connect = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws/chat/${sessionId}`
+    const apiHost = import.meta.env.VITE_API_BASE_URL
+      ? new URL(import.meta.env.VITE_API_BASE_URL).host
+      : window.location.host
+    const wsUrl = `${protocol}//${apiHost}/ws/chat/${sessionId}`
 
     try {
       const socket = new WebSocket(wsUrl)
@@ -213,7 +217,7 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
         timestamp: new Date()
       }])
 
-      const response = await fetch('/api/chat', {
+      const response = await fetch(`${API_BASE}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

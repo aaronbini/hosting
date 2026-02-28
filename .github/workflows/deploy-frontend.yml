@@ -1,0 +1,76 @@
+name: Deploy Frontend to GCS
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/deploy-frontend.yml'
+  workflow_dispatch:
+
+env:
+  GCS_BUCKET: ${{ vars.GCS_BUCKET }}
+
+jobs:
+  deploy:
+    name: Build and Deploy Frontend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: >-
+            projects/${{ vars.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: github-actions-deploy@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build
+        working-directory: frontend
+        env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+        run: npm run build
+
+      - name: Deploy all files (short cache TTL)
+        run: |
+          gcloud storage rsync \
+            --recursive \
+            --cache-control="public, max-age=60, no-transform" \
+            frontend/dist/ \
+            gs://${{ env.GCS_BUCKET }}/
+
+      - name: Overwrite hashed assets with long cache TTL
+        # Vite outputs content-hashed filenames in dist/assets/ — safe to cache for 1 year
+        run: |
+          gcloud storage rsync \
+            --recursive \
+            --cache-control="public, max-age=31536000, immutable" \
+            frontend/dist/assets/ \
+            gs://${{ env.GCS_BUCKET }}/assets/
+
+      - name: Invalidate Cloud CDN cache
+        run: |
+          gcloud compute url-maps invalidate-cdn-cache ${{ vars.CLOUD_CDN_URL_MAP }} \
+            --path="/*" \
+            --global \
+            --project=${{ vars.GCP_PROJECT_ID }}

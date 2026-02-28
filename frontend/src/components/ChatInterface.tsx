@@ -96,7 +96,7 @@ export default function ChatInterface({
           <div className="flex items-start justify-between">
             <div>
               <h1 className="text-3xl font-bold text-slate-900">
-                Food Event Planner
+                Hosting Helper
               </h1>
               <p className="text-slate-600 mt-2">
                 Let's plan your perfect event together
