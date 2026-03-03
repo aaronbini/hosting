@@ -88,7 +88,10 @@ def client():
 
 class TestExtractRecipeEndpoint:
     def test_missing_url_returns_400(self, client):
-        with patch("app.main._require_session_owner", new=AsyncMock(return_value=_make_session())):
+        with (
+            patch("app.main._require_session_owner", new=AsyncMock(return_value=_make_session())),
+            patch("app.main.ai_service", MagicMock()),
+        ):
             resp = client.post(
                 f"/api/sessions/{FAKE_SESSION_ID}/extract-recipe",
                 json={"dish_name": "Pasta Carbonara"},  # no url
@@ -96,7 +99,10 @@ class TestExtractRecipeEndpoint:
         assert resp.status_code == 400
 
     def test_missing_dish_name_returns_400(self, client):
-        with patch("app.main._require_session_owner", new=AsyncMock(return_value=_make_session())):
+        with (
+            patch("app.main._require_session_owner", new=AsyncMock(return_value=_make_session())),
+            patch("app.main.ai_service", MagicMock()),
+        ):
             resp = client.post(
                 f"/api/sessions/{FAKE_SESSION_ID}/extract-recipe",
                 json={"url": "https://example.com/recipe"},  # no dish_name
@@ -270,7 +276,10 @@ class TestUploadRecipeEndpoint:
         )
 
     def test_unsupported_mime_type_returns_400(self, client):
-        with patch("app.main._require_session_owner", new=AsyncMock(return_value=_make_session())):
+        with (
+            patch("app.main._require_session_owner", new=AsyncMock(return_value=_make_session())),
+            patch("app.main.ai_service", MagicMock()),
+        ):
             resp = client.post(
                 f"/api/sessions/{FAKE_SESSION_ID}/upload-recipe",
                 params={"dish_name": "Pasta Carbonara"},
