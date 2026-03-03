@@ -314,7 +314,7 @@ async def create_google_tasks(state: AgentState, tasks_service=None) -> AgentSta
     logger.info("[STEP 5b] Starting create_google_tasks")
     if not tasks_service:
         logger.warning("[STEP 5b] No TasksService provided — skipping (no Google credentials)")
-        state.google_tasks_url = None
+        state.google_tasks = None
         return state
 
     raw_date = state.event_data.event_date or datetime.date.today().isoformat()

@@ -80,6 +80,7 @@ class MealPlan(BaseModel):
 
     recipes: List[Recipe] = Field(default_factory=list)
     confirmed: bool = False  # User confirmed the full menu
+    menu_confirm_clicked: bool = False  # True after menu_confirm_request card has been sent
 
     @property
     def pending_user_recipes(self) -> List[Recipe]:
