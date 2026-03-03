@@ -1045,14 +1045,13 @@ async def extract_recipe_from_url(
 ):
     """Extract ingredients from a recipe URL."""
     session = await _require_session_owner(session_id, current_user, db)
+    if not ai_service:
+        raise HTTPException(status_code=503, detail="AI service not available")
 
     url = body.get("url")
     dish_name = body.get("dish_name")
     if not url or not dish_name:
         raise HTTPException(status_code=400, detail="url and dish_name are required")
-
-    if not ai_service:
-        raise HTTPException(status_code=503, detail="AI service not available")
 
     FALLBACK_MSG = (
         "Try taking a screenshot of the recipe and uploading it instead, "
