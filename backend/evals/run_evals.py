@@ -124,6 +124,7 @@ async def run_extraction_evals(ai_service) -> EvalSummary:
 
     for case in cases:
         case_id = case["id"]
+        print(f"Running extraction eval case: {case_id}...")
         try:
             from app.models.event import EventPlanningData
 
@@ -136,8 +137,8 @@ async def run_extraction_evals(ai_service) -> EvalSummary:
 
             extraction = await ai_service.extract_event_data(
                 user_message=case["input"],
-                event_data=event_data,
-                conversation_history=[],
+                current_event_data=event_data,
+                last_assistant_message=None,
             )
             actual = extraction.model_dump(exclude_none=True)
 
@@ -235,8 +236,15 @@ async def run_conversation_evals(ai_service) -> EvalSummary:
 
     for case in cases:
         case_id = case["id"]
+        print(f"Running conversation eval case: {case_id}...")
         try:
             from app.models.event import EventPlanningData
+
+            from app.models.event import (
+                PreparationMethod,
+                Recipe,
+                RecipeStatus,
+            )
 
             event_data = EventPlanningData()
             # Apply context fields
@@ -246,12 +254,34 @@ async def run_conversation_evals(ai_service) -> EvalSummary:
                     event_data.conversation_stage = val
                 elif key == "adult_count" and val is not None:
                     event_data.adult_count = val
+                elif key == "child_count" and val is not None:
+                    event_data.child_count = val
+                elif key == "event_type" and val:
+                    event_data.event_type = val
                 elif key == "cuisine_preferences" and val:
                     event_data.cuisine_preferences = val
+                elif key == "dietary_restrictions" and val:
+                    event_data.dietary_restrictions = val
+                elif key == "formality_level" and val:
+                    event_data.formality_level = val
                 elif key == "last_url_extraction_result":
                     event_data.last_url_extraction_result = val
                 elif key == "last_generated_recipes":
                     event_data.last_generated_recipes = val
+                elif key == "recipes" and isinstance(val, list):
+                    # val is a list of dicts: {name, status?, awaiting_user_input?}
+                    for r in val:
+                        recipe = Recipe(
+                            name=r["name"],
+                            status=RecipeStatus(r.get("status", "named")),
+                            awaiting_user_input=r.get("awaiting_user_input", False),
+                            preparation_method=PreparationMethod(
+                                r.get("preparation_method", "homemade")
+                            ),
+                        )
+                        if r.get("ingredients"):
+                            recipe.ingredients = r["ingredients"]
+                        event_data.meal_plan.add_recipe(recipe)
 
             # Generate the actual chatbot response
             response = await ai_service.generate_response(

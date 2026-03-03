@@ -230,6 +230,14 @@ class EventPlanningData(BaseModel):
         None, description="Newly generated default recipes to present to the user this turn"
     )
 
+    # Transient: set when a user-provided recipe is successfully received this turn
+    # (via URL extraction, file upload, or conversational description).
+    # Signals the AI to re-present the full ingredient list for all dishes.
+    # Cleared at the start of each apply_extraction call.
+    last_recipe_received: Optional[dict] = Field(
+        None, description="Dish name for which a user-provided recipe was just received"
+    )
+
     # Output format selection — set during selecting_output stage
     output_formats: List[OutputFormat] = Field(
         default_factory=list, description="How the user wants to receive the shopping list"

@@ -132,6 +132,7 @@ def apply_extraction(session: SessionData, extraction: ExtractionResult) -> None
     # Clear transient fields that are only valid for one turn
     event_data.last_url_extraction_result = None
     event_data.last_generated_recipes = None
+    event_data.last_recipe_received = None
 
     # 1. Apply standard extracted fields (exclude special fields)
     exclude_fields = {"answered_questions", "recipe_updates", "meal_plan_confirmed", "output_formats"}
@@ -618,26 +619,23 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     await _auto_generate_recipes(session, ai_service)
 
                     # Build a single formatted response (acknowledgment + ingredient list)
-                    if n_own and not n_ai:
-                        response_text = "Got it! Use the panel below to upload or describe each recipe."
-                    else:
-                        lines = ["Here's the ingredient list for each dish:\n"]
-                        for recipe in session.event_data.meal_plan.recipes:
-                            if recipe.preparation_method == PreparationMethod.STORE_BOUGHT:
-                                lines.append(f"**{recipe.name}** *(store-bought)*")
-                                lines.append("")
-                            elif not recipe.awaiting_user_input and recipe.ingredients:
-                                lines.append(f"**{recipe.name}**")
-                                for ing in recipe.ingredients:
-                                    name = ing.get("name", str(ing)) if isinstance(ing, dict) else str(ing)
-                                    lines.append(f"• {name}")
-                                lines.append("")
-                        if n_own:
-                            lines.append(
-                                f"I'll need you to provide your own "
-                                f"for {n_own} dish{'es' if n_own != 1 else ''} — use the upload panel below, or paste a URL to the recipe."
-                            )
-                        response_text = "\n".join(lines).strip()
+                    lines = ["Here's the ingredient list for each dish:\n"]
+                    for recipe in session.event_data.meal_plan.recipes:
+                        if recipe.preparation_method == PreparationMethod.STORE_BOUGHT:
+                            lines.append(f"**{recipe.name}** *(store-bought — no ingredient list needed)*")
+                            lines.append("")
+                        elif recipe.awaiting_user_input:
+                            lines.append(f"**{recipe.name}**")
+                            lines.append("*Awaiting your recipe — paste a URL, upload a file, or describe the key ingredients.*")
+                            lines.append("")
+                        elif recipe.ingredients:
+                            lines.append(f"**{recipe.name}**")
+                            for ing in recipe.ingredients:
+                                name = ing.get("name", str(ing)) if isinstance(ing, dict) else str(ing)
+                                lines.append(f"• {name}")
+                            lines.append("")
+                    lines.append("Does this look right, or would you like to make any changes?")
+                    response_text = "\n".join(lines).strip()
 
                     await websocket.send_json({
                         "type": "stream_start",
@@ -740,6 +738,10 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                         "success": True,
                                         "ingredient_count": len(ingredients),
                                     }
+                                    session.event_data.last_recipe_received = {
+                                        "dish": update.recipe_name,
+                                        "source": "url",
+                                    }
                                 except Exception as url_err:
                                     logger.warning(
                                         "URL extraction failed for '%s': %s", update.recipe_name, url_err
@@ -764,12 +766,28 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                         recipe.description = update.description
                                         recipe.status = RecipeStatus.COMPLETE
                                         recipe.awaiting_user_input = False
+                                        session.event_data.last_recipe_received = {
+                                            "dish": update.recipe_name,
+                                            "source": "description",
+                                        }
                                 except Exception as desc_err:
                                     logger.warning(
                                         "Description extraction failed for '%s': %s",
                                         update.recipe_name,
                                         desc_err,
                                     )
+
+                    # Upload detection: the frontend sends a fixed message after a successful
+                    # file upload. The REST endpoint already updated the recipe before this
+                    # WebSocket message arrived, so apply_extraction won't see any transition.
+                    # Detect the pattern here and set last_recipe_received manually.
+                    UPLOAD_PREFIX = "I uploaded a recipe file for "
+                    if msg_data.startswith(UPLOAD_PREFIX):
+                        dish_name = msg_data[len(UPLOAD_PREFIX):].rstrip(".")
+                        session.event_data.last_recipe_received = {
+                            "dish": dish_name,
+                            "source": "upload",
+                        }
 
                     # If gathering→recipe_confirmation happened via chat confirmation (user typed
                     # "yes" instead of clicking the Confirm button), intercept: revert to
