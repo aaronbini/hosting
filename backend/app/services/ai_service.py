@@ -234,7 +234,9 @@ class GeminiService:
                                   Roman for Italian), dishes with interesting textures or cooking methods,
                                   and less-obvious but crowd-pleasing options. Think of what an inspired
                                   home cook would serve, not a generic restaurant menu. Present suggestions
-                                  as a numbered list they can modify.
+                                  as a numbered list they can modify. After presenting, ask ONLY whether
+                                  the menu looks good or if they'd like to change anything — do NOT ask
+                                  about recipes or other topics in the same message.
                                 - If user provides SOME dishes and wants help with others: suggest dishes
                                   that complement what they already chose, with the same creative spirit.
                                 - If user mentions having their OWN recipe for any dish at any point,
@@ -243,8 +245,12 @@ class GeminiService:
 
                               Menu confirmation:
                                 Once dishes are collected AND all recipe promises are resolved, present the
-                                full menu and ask for explicit confirmation:
-                                "Here's your menu: [list]. Does this look complete, or would you like to change anything?"
+                                full menu and ask for explicit confirmation. Use this exact structure:
+                                1. Present the menu as a numbered list.
+                                2. Ask ONE question: "Does this look complete, or would you like to make any changes?"
+                                3. After the question, add ONE sentence: "Once you confirm, you'll have the chance to
+                                   provide your own recipes for any of the dishes before we build the shopping list."
+                                Do NOT ask whether they have their own recipes here — that comes in the next step.
                                 Do NOT move on until the user confirms.
 
                               Rules:
@@ -260,24 +266,30 @@ class GeminiService:
 
                               PRESENTING NEWLY GENERATED RECIPES:
                               If "last_generated_recipes" appears in CURRENT EVENT DATA, the system just generated
-                              default ingredient lists for those dishes. You MUST present them to the user now.
-                              Format each dish like this (use a bullet list for ingredients).
-                              List ingredient NAMES ONLY — no quantities or amounts:
+                              default ingredient lists for those dishes. You MUST present ALL dishes now —
+                              including those the user will provide their own recipe for.
+                              List ingredient NAMES ONLY — no quantities or amounts.
+                              Format: one block per dish in menu order.
+                              - For dishes with generated ingredients (from last_generated_recipes): bullet list.
+                              - For dishes with awaiting_user_input=true: a single italic placeholder line.
+                              - For store-bought items: a single italic note "(store-bought — no ingredient list needed)".
 
-                              "Here's the ingredient list I'm planning to use for each dish:
+                              Example format:
 
-                              **[Dish Name]**
+                              "Here's the ingredient list for each dish:
+
+                              **[AI-generated Dish]**
                               • ingredient name
                               • ingredient name
                               • …
 
-                              **[Next Dish]**
-                              • …
+                              **[User-provided Dish]**
+                              *Awaiting your recipe — you can paste a URL, upload a file, or describe the key ingredients.*
 
-                              Does this look right, or would you like to swap in your own recipe for any of these?
-                              You can paste a URL, upload a file, or describe the ingredients.
+                              Does this look right, or would you like to make any changes?
+                              You can paste a URL, upload a file, or describe the ingredients for any dish marked above.
 
-                              Full recipes (with complete step-by-step instructions) will be provided at the end — right now we're just confirming ingredient lists.
+                              Full recipes (with complete step-by-step instructions) will be provided at the end — right now we're just confirming ingredient lists."
 
                               ON SUBSEQUENT TURNS (no last_generated_recipes):
                               The user is reviewing or correcting dishes. Handle their feedback:
@@ -289,6 +301,25 @@ class GeminiService:
                                 guest count) will be included in the final output alongside the shopping list.
                                 There's no need to generate them in chat — they'll be nicely formatted and
                                 easy to reference while cooking. Then continue confirming the ingredient lists.
+                              - If they ask to clarify, elaborate on, or be more specific about an ingredient
+                                (e.g., "what seafood?", "can you elaborate on the mixed seafood", "what kind
+                                of cheese?"): treat this as an ingredient refinement request. In ONE concise
+                                sentence, name the specific items you plan to use. Then immediately re-present
+                                the FULL ingredient list for that dish in the standard bullet format (names
+                                only, no quantities), with the vague ingredient replaced by the specific ones.
+                                Close by asking if this works or if they'd like to make changes.
+                                Example response structure:
+                                  "For the [dish], I'd use [specific items, e.g., clams, mussels, shrimp, and calamari].
+
+                                  **[Dish Name]**
+                                  • clams
+                                  • mussels
+                                  • shrimp
+                                  • calamari
+                                  • [remaining ingredients...]
+
+                                  Does that work, or would you like to adjust the mix?"
+                                Do NOT give a long explanation or a bulleted breakdown of seafood categories.
 
                               For dishes where the user has their own recipe:
                               - They can paste a URL to an online recipe (ask them to paste the URL directly in chat)
@@ -348,13 +379,31 @@ class GeminiService:
                               The agent is calculating. Do not generate conversational responses.
 
                             ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                            RECIPE RECEIVED (check every turn):
+                            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                            If CURRENT EVENT DATA contains "last_recipe_received":
+
+                            A user-provided recipe was just successfully received (via URL, file upload,
+                            or description). Your response MUST:
+                            1. Acknowledge receipt in ONE brief sentence
+                               (e.g., "Got it — I've added the ingredients from your [dish] recipe.").
+                            2. Immediately re-present the FULL ingredient list for ALL dishes using
+                               the same format as the initial presentation:
+                               - AI-generated / confirmed dishes → ingredient bullet list (names only)
+                               - Dishes still with awaiting_user_input=true → placeholder line:
+                                 *Awaiting your recipe — paste a URL, upload a file, or describe the key ingredients.*
+                               - Store-bought → *(store-bought — no ingredient list needed)*
+                            3. Close with: "Does everything look right, or would you like to make any changes?"
+
+                            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                             RECIPE URL EXTRACTION RESULT (check every turn):
                             ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
                             If CURRENT EVENT DATA contains "last_url_extraction_result":
 
-                            If success=true: briefly confirm you received the recipe ingredients
-                            (e.g., "Got it — I extracted the ingredients from your [dish] recipe.").
+                            If success=true: the full re-presentation is already handled by the
+                            RECIPE RECEIVED block above — do NOT duplicate it here.
 
                             If success=false: your response MUST start with a clear, prominent failure
                             notice BEFORE anything else. Explain WHY it failed using the error field:
@@ -598,16 +647,22 @@ class GeminiService:
                       Example: User provides URL →
                         {{"recipe_name": "focaccia", "action": "update", "url": "https://...", "source_type": "user_url"}}
 
-                      CRITICAL — Confirming a suggested dish for a placeholder:
+                      CRITICAL — Confirming a suggested menu:
                       When the user says "yes", "looks good", or otherwise confirms a menu
                       that the assistant just suggested, check the Previous assistant message
-                      for specific dish names. For each PLACEHOLDER recipe in Current known
-                      data (status="placeholder"), find the matching suggested dish by role
-                      (e.g., "main" placeholder → the main course suggestion) and rename it
-                      using action "update" — do NOT add it as a new recipe.
-                      Example: "main" placeholder exists, previous assistant suggested
-                      "Slow-braised Beef Short Rib Ragu" for the main, user says "yes" →
-                        {{"recipe_name": "main", "action": "update", "new_name": "Slow-braised Beef Short Rib Ragu", "status": "named"}}
+                      for specific dish names. For EVERY recipe in Current known data where the
+                      assistant suggested a more specific name (whether the current name is a
+                      generic placeholder like "main" OR a category name the user mentioned like
+                      "focaccia", "salad", "dessert", "veggie side"), rename it using action
+                      "update" with the specific name from the assistant's suggestion.
+                      Do NOT add it as a new recipe — always update the existing one.
+                      Examples:
+                        "main" placeholder exists, assistant suggested "Spaghetti alle Vongole" →
+                          {{"recipe_name": "main", "action": "update", "new_name": "Spaghetti alle Vongole", "status": "named"}}
+                        "focaccia" exists, assistant suggested "Rosemary and Sea Salt Focaccia" →
+                          {{"recipe_name": "focaccia", "action": "update", "new_name": "Rosemary and Sea Salt Focaccia", "status": "named"}}
+                        "salad" exists, assistant suggested "Panzanella" →
+                          {{"recipe_name": "salad", "action": "update", "new_name": "Panzanella", "status": "named"}}
 
                       CAPTURING INGREDIENTS FROM CONFIRMED SUGGESTIONS:
                       If the Previous assistant message listed specific ingredients for a dish
@@ -822,7 +877,10 @@ class GeminiService:
                     Rules:
                     - Use a standard recipe for 4 adult servings per dish.
                     - Return one entry in 'dishes' per dish, in the same order listed above.
-                    - List all ingredients needed to make each dish.
+                    - List ALL ingredients needed to make each dish — including the primary protein,
+                      every vegetable, and every sauce/seasoning component. Never omit a major ingredient.
+                      Never assume any ingredient is "already prepared", "available separately", or
+                      "assumed available" — if it belongs in the dish, it must appear in the list.
                     - Standardise names ("olive oil" not "EVOO", "spring onions" not "scallions").
                     {INGREDIENT_UNIT_RULES}
                     {BASE_RECIPE_QUANTITY_GUIDE}
@@ -897,10 +955,16 @@ class GeminiService:
 
                     Rules:
                     - Write clear, practical instructions a home cook can follow.
-                    - Reference the specific ingredients and quantities provided.
+                    - Reference ONLY the exact ingredients and quantities provided in each dish's list.
                     - Each instruction step should be a single complete action.
                     - Include timing guidance where helpful (e.g., "cook for 10 minutes").
-                    - Do NOT add ingredients not in the list.
+                    - CRITICAL: Do NOT reference any ingredient that is not in the provided list.
+                      Never write notes like "(not in list)", "(not included in ingredients)",
+                      "(assume it's ready)", or "(assumed available)". If a step would need an
+                      ingredient not in the list, skip it or adapt the step to use only listed items.
+                    - Kitchen equipment (pans, baking dishes, bowls, utensils, thermometers, etc.)
+                      is NEVER an ingredient — assume standard kitchen equipment is always available
+                      and never add parenthetical notes about it.
                     - Return one entry in 'recipes' per dish, in the same order listed.
 
                     Dishes:
@@ -910,13 +974,13 @@ class GeminiService:
         logger.info(
             "🤖 AI CALL: generate_recipe_instructions_batch (dishes=%d, model=%s)",
             len(dishes),
-            self.fast_model_name,
+            self.model_name,
         )
         result: _RecipeDetailsBatch = await self._async_json_call(
             prompt,
             _RecipeDetailsBatch,
             temperature=0.4,
-            model=self.fast_model_name,
+            model=self.model_name,
         )
         logger.info(
             "✅ AI RESPONSE: generate_recipe_instructions_batch → %d dishes",

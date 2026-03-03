@@ -80,6 +80,7 @@ class MealPlan(BaseModel):
 
     recipes: List[Recipe] = Field(default_factory=list)
     confirmed: bool = False  # User confirmed the full menu
+    menu_confirm_clicked: bool = False  # True after menu_confirm_request card has been sent
 
     @property
     def pending_user_recipes(self) -> List[Recipe]:
@@ -227,6 +228,14 @@ class EventPlanningData(BaseModel):
     # Cleared at the start of each apply_extraction call.
     last_generated_recipes: Optional[List[Dict]] = Field(
         None, description="Newly generated default recipes to present to the user this turn"
+    )
+
+    # Transient: set when a user-provided recipe is successfully received this turn
+    # (via URL extraction, file upload, or conversational description).
+    # Signals the AI to re-present the full ingredient list for all dishes.
+    # Cleared at the start of each apply_extraction call.
+    last_recipe_received: Optional[dict] = Field(
+        None, description="Dish name for which a user-provided recipe was just received"
     )
 
     # Output format selection — set during selecting_output stage

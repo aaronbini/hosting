@@ -38,6 +38,8 @@ export default function ChatInterface({
     connect,
     sendMessage,
     approveShoppingList,
+    confirmMenu,
+    confirmRecipes,
     selectOutputs,
     isConnected
   } = useChat(sessionId, { initialMessages, initialEventData, initialCompletionScore, initialIsComplete })
@@ -45,6 +47,8 @@ export default function ChatInterface({
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const connectionAttempted = useRef(false)
   const [isGoogleConnected, setIsGoogleConnected] = useState(false)
+  const [showGoogleConnectedBanner, setShowGoogleConnectedBanner] = useState(false)
+  const [bannerVisible, setBannerVisible] = useState(false)
 
   const needsGoogleOutput =
     eventData?.output_formats?.includes('google_tasks') ||
@@ -61,6 +65,10 @@ export default function ChatInterface({
     const onMessage = (event: MessageEvent) => {
       if (event.data === 'google_auth_complete') {
         setIsGoogleConnected(true)
+        setShowGoogleConnectedBanner(true)
+        setTimeout(() => setBannerVisible(true), 10)
+        setTimeout(() => setBannerVisible(false), 2500)
+        setTimeout(() => setShowGoogleConnectedBanner(false), 3000)
         window.removeEventListener('message', onMessage)
         popup?.close()
         // Re-trigger the agent now that credentials are set
@@ -121,6 +129,10 @@ export default function ChatInterface({
           excludedItems={excludedItems}
           onToggleExcluded={toggleExcludedItem}
           onSelectOutputs={selectOutputs}
+          onConfirmMenu={confirmMenu}
+          onConfirmRecipes={confirmRecipes}
+          isAwaitingReview={isAwaitingReview}
+          onApprove={approveShoppingList}
         />
 
         {/* Recipe upload — visible only while there are recipes awaiting user input */}
@@ -153,28 +165,15 @@ export default function ChatInterface({
             </button>
           </div>
         )}
-        {needsGoogleOutput && isGoogleConnected && (
-          <div className="border-t border-slate-200 bg-green-50 px-4 py-3">
+        {needsGoogleOutput && showGoogleConnectedBanner && (
+          <div
+            className="border-t border-slate-200 bg-green-50 px-4 py-3 transition-opacity duration-500"
+            style={{ opacity: bannerVisible ? 1 : 0 }}
+          >
             <p className="text-sm text-green-700">✓ Google account connected</p>
           </div>
         )}
 
-        {/* Approve button — visible while agent awaits review */}
-        {isAwaitingReview && (
-          <div className="border-t border-slate-200 bg-green-50 px-4 py-3 flex items-center gap-3">
-            <p className="text-sm text-slate-600 flex-1">
-              {excludedItems.size > 0
-                ? `Removing ${excludedItems.size} item${excludedItems.size > 1 ? 's' : ''} you already have.`
-                : 'Check off anything you already have, then approve to continue.'}
-            </p>
-            <button
-              onClick={approveShoppingList}
-              className="px-5 py-2 text-sm font-medium rounded bg-green-600 text-white hover:bg-green-700 transition-colors shrink-0"
-            >
-              {excludedItems.size > 0 ? 'Approve with edits' : 'Approve'}
-            </button>
-          </div>
-        )}
 
         {/* Input Area */}
         <ChatInput

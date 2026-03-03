@@ -132,6 +132,7 @@ def apply_extraction(session: SessionData, extraction: ExtractionResult) -> None
     # Clear transient fields that are only valid for one turn
     event_data.last_url_extraction_result = None
     event_data.last_generated_recipes = None
+    event_data.last_recipe_received = None
 
     # 1. Apply standard extracted fields (exclude special fields)
     exclude_fields = {"answered_questions", "recipe_updates", "meal_plan_confirmed", "output_formats"}
@@ -183,6 +184,7 @@ def apply_extraction(session: SessionData, extraction: ExtractionResult) -> None
         if any(u.action in ("add", "remove") for u in extraction.recipe_updates):
             event_data.meal_plan.confirmed = False
             event_data.answered_questions["meal_plan"] = False
+            event_data.meal_plan.menu_confirm_clicked = False  # menu changed, allow card to reappear
 
     if extraction.meal_plan_confirmed:
         event_data.meal_plan.confirmed = True
@@ -466,6 +468,43 @@ async def delete_session(
 
 
 # ============================================================================
+# Helpers
+# ============================================================================
+
+
+async def _auto_generate_recipes(session: SessionData, ai_service: GeminiService) -> bool:
+    """Auto-generate ingredient lists for all eligible HOMEMADE recipes.
+
+    Eligible = not awaiting user input, not a placeholder, not store-bought.
+    Returns True if any recipes were generated.
+    """
+    recipes_needing = [
+        r
+        for r in session.event_data.meal_plan.recipes
+        if r.needs_ingredients()
+        and not r.awaiting_user_input
+        and r.status != RecipeStatus.PLACEHOLDER
+        and not (r.recipe_type == RecipeType.DRINK and r.preparation_method == PreparationMethod.STORE_BOUGHT)
+        and r.preparation_method != PreparationMethod.STORE_BOUGHT
+    ]
+    if not recipes_needing:
+        return False
+    logger.info(
+        "Auto-generating default ingredients for %d recipes (batched)",
+        len(recipes_needing),
+    )
+    results = await ai_service.generate_default_recipes_batch([r.name for r in recipes_needing])
+    newly_generated = []
+    for recipe, ingredients in zip(recipes_needing, results):
+        recipe.ingredients = [i.model_dump(mode="json") for i in ingredients]
+        recipe.status = RecipeStatus.COMPLETE
+        newly_generated.append({"dish": recipe.name, "ingredients": recipe.ingredients})
+    session.event_data.last_generated_recipes = newly_generated
+    session.event_data.compute_derived_fields()
+    return True
+
+
+# ============================================================================
 # WebSocket Endpoint
 # ============================================================================
 
@@ -540,7 +579,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
             msg_type = data.get("type")
             msg_data = data.get("data")
 
-            if msg_type not in ("message", "select_outputs") or (msg_type == "message" and not msg_data):
+            if msg_type not in ("message", "select_outputs", "confirm_menu", "confirm_recipes") or (msg_type == "message" and not msg_data):
                 await websocket.send_json(
                     {"type": "error", "data": {"error": "Invalid message format"}}
                 )
@@ -554,7 +593,82 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 continue
 
             try:
-                if msg_type == "select_outputs":
+                if msg_type == "confirm_menu":
+                    if session.event_data.conversation_stage != "gathering":
+                        continue
+                    own_recipe_names: list[str] = msg_data if isinstance(msg_data, list) else []
+                    own_lower = {n.lower() for n in own_recipe_names}
+                    for recipe in session.event_data.meal_plan.recipes:
+                        if recipe.preparation_method == PreparationMethod.HOMEMADE:
+                            recipe.awaiting_user_input = recipe.name.lower() in own_lower
+                    session.event_data.conversation_stage = "recipe_confirmation"
+                    session.event_data.compute_derived_fields()
+
+                    n_own = len(own_lower)
+                    n_ai = sum(
+                        1 for r in session.event_data.meal_plan.recipes
+                        if not r.awaiting_user_input
+                        and r.preparation_method == PreparationMethod.HOMEMADE
+                    )
+                    logger.info(
+                        "✅ MENU CONFIRMED (session=%s) — own=%d, ai=%d",
+                        session_id[:8], n_own, n_ai,
+                    )
+
+                    # Auto-generate ingredients for dishes the user isn't providing
+                    await _auto_generate_recipes(session, ai_service)
+
+                    # Build a single formatted response (acknowledgment + ingredient list)
+                    lines = ["Here's the ingredient list for each dish:\n"]
+                    for recipe in session.event_data.meal_plan.recipes:
+                        if recipe.preparation_method == PreparationMethod.STORE_BOUGHT:
+                            lines.append(f"**{recipe.name}** *(store-bought — no ingredient list needed)*")
+                            lines.append("")
+                        elif recipe.awaiting_user_input:
+                            lines.append(f"**{recipe.name}**")
+                            lines.append("*Awaiting your recipe — paste a URL, upload a file, or describe the key ingredients.*")
+                            lines.append("")
+                        elif recipe.ingredients:
+                            lines.append(f"**{recipe.name}**")
+                            for ing in recipe.ingredients:
+                                name = ing.get("name", str(ing)) if isinstance(ing, dict) else str(ing)
+                                lines.append(f"• {name}")
+                            lines.append("")
+                    lines.append("Does this look right, or would you like to make any changes?")
+                    response_text = "\n".join(lines).strip()
+
+                    await websocket.send_json({
+                        "type": "stream_start",
+                        "data": {
+                            "completion_score": session.event_data.completion_score,
+                            "is_complete": session.event_data.is_complete,
+                            "event_data": session.event_data.model_dump(mode="json"),
+                        },
+                    })
+                    await websocket.send_json({"type": "stream_chunk", "data": {"text": response_text}})
+                    await websocket.send_json({"type": "stream_end"})
+                    session.add_message(MessageRole.ASSISTANT, response_text)
+
+                    # Prompt recipe confirmation inline if no own-recipe uploads pending
+                    if not n_own:
+                        await websocket.send_json({"type": "recipe_confirm_request"})
+
+                    async with async_session_factory() as db:
+                        await db_session_manager.save_session(session, db)
+                    continue
+
+                elif msg_type == "confirm_recipes":
+                    if session.event_data.conversation_stage != "recipe_confirmation":
+                        continue
+                    session.event_data.meal_plan.confirmed = True
+                    session.event_data.conversation_stage = "selecting_output"
+                    session.event_data.compute_derived_fields()
+                    logger.info(
+                        "✅ RECIPES CONFIRMED (session=%s) — advancing to selecting_output",
+                        session_id[:8],
+                    )
+
+                elif msg_type == "select_outputs":
                     # Direct output format selection — bypass AI extraction entirely
                     formats = msg_data if isinstance(msg_data, list) else []
                     valid = [
@@ -579,6 +693,8 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         session.event_data.conversation_stage,
                         msg_data[:100],
                     )
+
+                    pre_extraction_stage = session.event_data.conversation_stage
 
                     last_assistant = next(
                         (
@@ -622,6 +738,10 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                         "success": True,
                                         "ingredient_count": len(ingredients),
                                     }
+                                    session.event_data.last_recipe_received = {
+                                        "dish": update.recipe_name,
+                                        "source": "url",
+                                    }
                                 except Exception as url_err:
                                     logger.warning(
                                         "URL extraction failed for '%s': %s", update.recipe_name, url_err
@@ -646,6 +766,10 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                         recipe.description = update.description
                                         recipe.status = RecipeStatus.COMPLETE
                                         recipe.awaiting_user_input = False
+                                        session.event_data.last_recipe_received = {
+                                            "dish": update.recipe_name,
+                                            "source": "description",
+                                        }
                                 except Exception as desc_err:
                                     logger.warning(
                                         "Description extraction failed for '%s': %s",
@@ -653,35 +777,61 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                         desc_err,
                                     )
 
-                    # During recipe_confirmation, auto-generate default ingredient lists for
-                    # any AI_DEFAULT recipes that haven't been generated yet.
-                    if session.event_data.conversation_stage == "recipe_confirmation":
-                        recipes_needing_ingredients = [
-                            r
-                            for r in session.event_data.meal_plan.recipes
-                            if r.needs_ingredients()
+                    # Upload detection: the frontend sends a fixed message after a successful
+                    # file upload. The REST endpoint already updated the recipe before this
+                    # WebSocket message arrived, so apply_extraction won't see any transition.
+                    # Detect the pattern here and set last_recipe_received manually.
+                    UPLOAD_PREFIX = "I uploaded a recipe file for "
+                    if msg_data.startswith(UPLOAD_PREFIX):
+                        dish_name = msg_data[len(UPLOAD_PREFIX):].rstrip(".")
+                        session.event_data.last_recipe_received = {
+                            "dish": dish_name,
+                            "source": "upload",
+                        }
+
+                    # If gathering→recipe_confirmation happened via chat confirmation (user typed
+                    # "yes" instead of clicking the Confirm button), intercept: revert to
+                    # gathering and show the menu_confirm_request card so the user can choose
+                    # which dishes they'll provide their own recipes for.
+                    if (
+                        pre_extraction_stage == "gathering"
+                        and session.event_data.conversation_stage == "recipe_confirmation"
+                        and not session.event_data.meal_plan.menu_confirm_clicked
+                    ):
+                        # All recipes ready to confirm (non-placeholder, non-awaiting)
+                        confirmable = [
+                            r for r in session.event_data.meal_plan.recipes
+                            if r.status != RecipeStatus.PLACEHOLDER
                             and not r.awaiting_user_input
-                            and r.status != RecipeStatus.PLACEHOLDER
-                            and not (r.recipe_type == RecipeType.DRINK and r.preparation_method == PreparationMethod.STORE_BOUGHT)
-                            and r.preparation_method != PreparationMethod.STORE_BOUGHT
                         ]
-                        if recipes_needing_ingredients:
+                        has_homemade = any(r.preparation_method == PreparationMethod.HOMEMADE for r in confirmable)
+                        if has_homemade:
+                            session.event_data.conversation_stage = "gathering"
+                            session.event_data.meal_plan.confirmed = False
+                            session.event_data.meal_plan.menu_confirm_clicked = True
                             logger.info(
-                                "Auto-generating default ingredients for %d recipes (batched)",
-                                len(recipes_needing_ingredients),
+                                "🃏 INTERCEPTED gathering→recipe_confirmation (session=%s) — "
+                                "showing menu_confirm_request with %d items",
+                                session_id[:8], len(confirmable),
                             )
-                            results = await ai_service.generate_default_recipes_batch(
-                                [r.name for r in recipes_needing_ingredients]
-                            )
-                            newly_generated = []
-                            for recipe, ingredients in zip(recipes_needing_ingredients, results):
-                                recipe.ingredients = [i.model_dump(mode="json") for i in ingredients]
-                                recipe.status = RecipeStatus.COMPLETE
-                                newly_generated.append(
-                                    {"dish": recipe.name, "ingredients": recipe.ingredients}
-                                )
-                            session.event_data.last_generated_recipes = newly_generated
-                            session.event_data.compute_derived_fields()
+                            await websocket.send_json({
+                                "type": "menu_confirm_request",
+                                "recipes": [
+                                    {
+                                        "name": r.name,
+                                        "store_bought": r.preparation_method == PreparationMethod.STORE_BOUGHT,
+                                    }
+                                    for r in confirmable
+                                ],
+                            })
+                            async with async_session_factory() as db:
+                                await db_session_manager.save_session(session, db)
+                            continue
+
+                    # During recipe_confirmation, auto-generate default ingredient lists for
+                    # any HOMEMADE recipes the user isn't providing themselves.
+                    if session.event_data.conversation_stage == "recipe_confirmation":
+                        await _auto_generate_recipes(session, ai_service)
 
                 # If we just transitioned to agent_running, hand off to the agent
                 if session.event_data.conversation_stage == "agent_running":
@@ -832,6 +982,37 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     complete_response[:100] + "..." if len(complete_response) > 100 else complete_response,
                 )
                 await websocket.send_json({"type": "stream_end"})
+
+                # After gathering: if ALL recipes are specifically named (no placeholders,
+                # no pending user input) and the card hasn't been shown yet, send it.
+                if session.event_data.conversation_stage == "gathering":
+                    recipes = session.event_data.meal_plan.recipes
+                    confirmable = [
+                        r for r in recipes
+                        if r.status != RecipeStatus.PLACEHOLDER and not r.awaiting_user_input
+                    ]
+                    if (
+                        confirmable
+                        and not session.event_data.meal_plan.menu_confirm_clicked
+                        and len(confirmable) == len(recipes)  # all recipes are ready
+                        and any(r.preparation_method == PreparationMethod.HOMEMADE for r in confirmable)
+                    ):
+                        await websocket.send_json({
+                            "type": "menu_confirm_request",
+                            "recipes": [
+                                {
+                                    "name": r.name,
+                                    "store_bought": r.preparation_method == PreparationMethod.STORE_BOUGHT,
+                                }
+                                for r in confirmable
+                            ],
+                        })
+                        session.event_data.meal_plan.menu_confirm_clicked = True
+                # After recipe_confirmation: if all resolved, send inline confirm card
+                elif session.event_data.conversation_stage == "recipe_confirmation":
+                    has_pending = any(r.awaiting_user_input for r in session.event_data.meal_plan.recipes)
+                    if not has_pending and not session.event_data.meal_plan.confirmed:
+                        await websocket.send_json({"type": "recipe_confirm_request"})
 
                 # Persist session state after each message round-trip
                 async with async_session_factory() as db:

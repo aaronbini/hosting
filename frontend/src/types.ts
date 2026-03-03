@@ -65,12 +65,19 @@ export interface User {
   picture?: string
 }
 
+export interface MenuConfirmItem {
+  name: string
+  store_bought: boolean
+}
+
 export interface Message {
   role: 'user' | 'assistant'
   content: string
   timestamp: Date
   shoppingList?: any
   outputOptions?: OutputOption[]
+  menuConfirmRecipes?: MenuConfirmItem[]
+  recipeConfirmPrompt?: boolean
 }
 
 export interface SavedPlanSummary {

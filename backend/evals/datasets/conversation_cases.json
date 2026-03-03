@@ -61,5 +61,66 @@
       "conversation_stage": "selecting_output"
     },
     "rubric": "Response should clearly explain the available output formats (in-chat list, Google Tasks). Should ask which format the user prefers. Should not start generating the shopping list yet."
+  },
+  {
+    "id": "awaiting_recipe_blocks_progression",
+    "description": "When a recipe has awaiting_user_input=True, AI should focus on collecting it",
+    "user_message": "What should we do next?",
+    "context": {
+      "conversation_stage": "recipe_confirmation",
+      "recipes": [
+        {
+          "name": "Pasta Carbonara",
+          "status": "named",
+          "awaiting_user_input": true,
+          "preparation_method": "homemade"
+        },
+        {
+          "name": "Tiramisu",
+          "status": "complete",
+          "awaiting_user_input": false,
+          "preparation_method": "homemade"
+        }
+      ]
+    },
+    "rubric": "Response must ask the user to provide their Pasta Carbonara recipe (URL, file upload, or description). Must NOT advance to output selection or the shopping list. Should NOT generate a default recipe for it."
+  },
+  {
+    "id": "dietary_restrictions_acknowledged",
+    "description": "AI acknowledges dietary restrictions when suggesting dishes",
+    "user_message": "What would you suggest for the main course?",
+    "context": {
+      "conversation_stage": "gathering",
+      "adult_count": 10,
+      "dietary_restrictions": [{"type": "vegan", "count": 2}],
+      "cuisine_preferences": ["Italian"]
+    },
+    "rubric": "Response must suggest a main course dish that either is vegan-friendly OR explicitly acknowledges a vegan option alongside the main suggestion. Must not suggest purely meat-based dishes without noting the vegan guests."
+  },
+  {
+    "id": "store_bought_item_not_asked_for_recipe",
+    "description": "When a store-bought dish is on the menu, AI should not ask for a recipe",
+    "user_message": "Is there anything I still need to provide?",
+    "context": {
+      "conversation_stage": "recipe_confirmation",
+      "recipes": [
+        {
+          "name": "Sourdough Bread",
+          "status": "complete",
+          "awaiting_user_input": false,
+          "preparation_method": "store_bought"
+        },
+        {
+          "name": "Pasta Carbonara",
+          "status": "complete",
+          "awaiting_user_input": false,
+          "preparation_method": "homemade",
+          "ingredients": [
+            {"name": "pasta", "quantity": 1.0, "unit": "lbs", "grocery_category": "pantry"}
+          ]
+        }
+      ]
+    },
+    "rubric": "Response should NOT ask for a recipe for Sourdough Bread (it is store-bought). Should confirm all recipes are ready and prompt the user to confirm, or explain the next step."
   }
 ]

@@ -91,5 +91,49 @@
     "expected": {
       "output_formats": ["in_chat"]
     }
+  },
+  {
+    "id": "output_format_google_tasks",
+    "description": "User explicitly requests Google Tasks output",
+    "input": "Can you add it to my Google Tasks list?",
+    "expected": {
+      "output_formats": ["google_tasks"]
+    }
+  },
+  {
+    "id": "multiple_recipes_at_once",
+    "description": "User specifies several dishes in one message",
+    "input": "Let's do pasta carbonara, a Caesar salad, and tiramisu for dessert",
+    "expected_recipe_updates": [
+      {"action": "add", "recipe_name": "pasta carbonara"},
+      {"action": "add", "recipe_name": "caesar salad"},
+      {"action": "add", "recipe_name": "tiramisu"}
+    ]
+  },
+  {
+    "id": "user_promises_own_recipe",
+    "description": "User says they have their own recipe for a dish — awaiting_user_input should be set",
+    "input": "I have my own recipe for the pasta, I'll share it with you",
+    "context_recipes": ["Pasta Carbonara", "Salad"],
+    "expected_recipe_updates": [
+      {"action": "update", "recipe_name": "pasta carbonara"}
+    ]
+  },
+  {
+    "id": "recipe_rename",
+    "description": "User renames an existing dish on the menu",
+    "input": "Actually can we change the pasta to bucatini all'amatriciana instead?",
+    "context_recipes": ["Pasta Carbonara", "Tiramisu"],
+    "expected_recipe_updates": [
+      {"action": "update", "recipe_name": "pasta carbonara"}
+    ]
+  },
+  {
+    "id": "event_date_extraction",
+    "description": "User mentions the event date",
+    "input": "The party is on Saturday, March 15th",
+    "expected": {
+      "event_date": "2026-03-15"
+    }
   }
 ]

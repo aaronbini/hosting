@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react'
-import { EventData, Message, OutputOption } from '../types'
+import { EventData, MenuConfirmItem, Message, OutputOption } from '../types'
 import { API_BASE } from '../api'
 
 type WebSocketMessage =
@@ -13,6 +13,8 @@ type WebSocketMessage =
   | { type: 'agent_complete'; stage: string; formatted_output?: string; formatted_recipes_output?: string | null; google_sheet_url?: string | null; google_tasks?: { url: string; list_title: string } | null }
   | { type: 'agent_error'; stage: string; message: string }
   | { type: 'output_selection'; options: OutputOption[] }
+  | { type: 'menu_confirm_request'; recipes: MenuConfirmItem[] }
+  | { type: 'recipe_confirm_request' }
 
 interface UseChatReturn {
   messages: Message[]
@@ -28,6 +30,8 @@ interface UseChatReturn {
   sendMessage: (message: string) => void
   sendMessageRest: (message: string) => Promise<void>
   approveShoppingList: () => void
+  confirmMenu: (ownRecipeNames: string[]) => void
+  confirmRecipes: () => void
   selectOutputs: (formats: string[]) => void
   isConnected: boolean
 }
@@ -170,6 +174,22 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
             timestamp: new Date()
           }])
           setIsLoading(false)
+        } else if (data.type === 'menu_confirm_request') {
+          setMessages(prev => [...prev, {
+            role: 'assistant',
+            content: '',
+            menuConfirmRecipes: data.recipes,
+            timestamp: new Date()
+          }])
+          setIsLoading(false)
+        } else if (data.type === 'recipe_confirm_request') {
+          setMessages(prev => [...prev, {
+            role: 'assistant',
+            content: '',
+            recipeConfirmPrompt: true,
+            timestamp: new Date()
+          }])
+          setIsLoading(false)
         }
       }
 
@@ -269,6 +289,18 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
     setExcludedItems(new Set())
   }, [ws, excludedItems])
 
+  const confirmMenu = useCallback((ownRecipeNames: string[]) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    setIsLoading(true)
+    ws.send(JSON.stringify({ type: 'confirm_menu', data: ownRecipeNames }))
+  }, [ws])
+
+  const confirmRecipes = useCallback(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    setIsLoading(true)
+    ws.send(JSON.stringify({ type: 'confirm_recipes' }))
+  }, [ws])
+
   const selectOutputs = useCallback((formats: string[]) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     setIsLoading(true)
@@ -289,6 +321,8 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
     sendMessage,
     sendMessageRest,
     approveShoppingList,
+    confirmMenu,
+    confirmRecipes,
     selectOutputs,
     isConnected: ws?.readyState === WebSocket.OPEN
   }
