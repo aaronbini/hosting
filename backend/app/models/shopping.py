@@ -1,3 +1,4 @@
+import math
 from enum import Enum
 from typing import Dict, List, Optional
 
@@ -51,10 +52,39 @@ class QuantityUnit(str, Enum):
     # Bulk
     BUNCH = "bunch"
     HEAD = "head"
+    BULBS = "bulbs"
     CLOVES = "cloves"
     SLICES = "slices"
     CANS = "cans"
+    BOTTLES = "bottles"
     PACKAGES = "packages"
+
+
+# Singular forms for units whose enum value is plural.
+# Units not listed here are already singular/uninflected (oz, fl oz, tbsp, tsp, …).
+_SINGULAR: dict[str, str] = {
+    "lbs": "lb",
+    "cups": "cup",
+    "pints": "pint",
+    "quarts": "quart",
+    "gallons": "gallon",
+    "liters": "liter",
+    "grams": "gram",
+    "bottles": "bottle",
+    "cans": "can",
+    "cloves": "clove",
+    "bulbs": "bulb",
+    "slices": "slice",
+    "packages": "package",
+}
+
+
+def display_unit(quantity: float, unit: QuantityUnit) -> str:
+    """Return the display form of a unit, singularised when quantity rounds to 1."""
+    val = unit.value
+    if math.ceil(quantity) == 1:
+        return _SINGULAR.get(val, val)
+    return val
 
 
 class RecipeIngredient(BaseModel):
