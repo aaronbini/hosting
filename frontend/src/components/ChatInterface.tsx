@@ -4,8 +4,8 @@ import ChatMessages from './ChatMessages'
 import ChatInput from './ChatInput'
 import EventDataPanel from './EventDataPanel'
 import RecipeUploadPanel from './RecipeUploadPanel'
-import type { EventData, Message } from '../types'
-import { API_BASE } from '../api'
+import type { ActiveCard, EventData, Message } from '../types'
+import { apiFetch } from '../api'
 
 
 interface Props {
@@ -14,6 +14,7 @@ interface Props {
   initialEventData?: EventData | null
   initialCompletionScore?: number
   initialIsComplete?: boolean
+  initialActiveCard?: ActiveCard
   onNewSession: () => void
 }
 
@@ -23,6 +24,7 @@ export default function ChatInterface({
   initialEventData,
   initialCompletionScore,
   initialIsComplete,
+  initialActiveCard,
   onNewSession,
 }: Props) {
   const {
@@ -34,6 +36,7 @@ export default function ChatInterface({
     isComplete,
     isAwaitingReview,
     excludedItems,
+    activeCard,
     toggleExcludedItem,
     connect,
     sendMessage,
@@ -42,7 +45,7 @@ export default function ChatInterface({
     confirmRecipes,
     selectOutputs,
     isConnected
-  } = useChat(sessionId, { initialMessages, initialEventData, initialCompletionScore, initialIsComplete })
+  } = useChat(sessionId, { initialMessages, initialEventData, initialCompletionScore, initialIsComplete, initialActiveCard })
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const connectionAttempted = useRef(false)
@@ -57,7 +60,7 @@ export default function ChatInterface({
   const needsGoogleAuth = needsGoogleOutput && !isGoogleConnected
 
   const handleConnectGoogle = useCallback(async () => {
-    const res = await fetch(`${API_BASE}/api/auth/google/start?session_id=${sessionId}`)
+    const res = await apiFetch(`/api/auth/google/start?session_id=${sessionId}`)
     if (!res.ok) return
     const { auth_url } = await res.json()
     const popup = window.open(auth_url, 'google_oauth', 'width=500,height=650')
@@ -95,27 +98,20 @@ export default function ChatInterface({
   return (
     <div className="flex flex-1 overflow-hidden">
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col max-w-4xl mx-auto w-full">
+      <div className="flex-1 flex flex-col min-h-0 max-w-4xl mx-auto w-full">
         {/* Header */}
-        <div className="bg-white border-b border-slate-200 p-6 shadow-sm">
-          <div className="flex items-start justify-between">
-            <div>
-              <h1 className="text-3xl font-bold text-slate-900">
-                Hosting Helper
-              </h1>
-              <p className="text-slate-600 mt-2">
-                Let's plan your perfect event together
-              </p>
-            </div>
+        <div className="bg-white border-b border-slate-200 px-6 py-3 shrink-0">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-slate-500">Let's plan your perfect event together</p>
             <button
               onClick={onNewSession}
-              className="px-4 py-2 text-sm font-medium rounded border border-slate-300 text-slate-600 hover:bg-slate-50 transition-colors shrink-0 mt-1"
+              className="px-3 py-1.5 text-sm font-medium rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-all shadow-sm shrink-0"
             >
-              New Event
+              + New Event
             </button>
           </div>
           {error && (
-            <div className="mt-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded">
+            <div className="mt-2 p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm">
               {error}
             </div>
           )}
@@ -127,6 +123,7 @@ export default function ChatInterface({
           isLoading={isLoading}
           messagesEndRef={messagesEndRef}
           excludedItems={excludedItems}
+          activeCard={activeCard}
           onToggleExcluded={toggleExcludedItem}
           onSelectOutputs={selectOutputs}
           onConfirmMenu={confirmMenu}
@@ -148,18 +145,16 @@ export default function ChatInterface({
 
         {/* Connect Google — visible when a Google output is selected and not yet authenticated */}
         {needsGoogleAuth && (
-          <div className="border-t border-slate-200 bg-blue-50 px-4 py-3 flex items-center gap-3">
+          <div className="border-t border-slate-100 bg-blue-50 px-5 py-3 flex items-center gap-4">
             <div className="flex-1">
-              <p className="text-sm text-slate-600">
-                Google output selected — connect your Google account to continue.
-              </p>
+              <p className="text-sm font-medium text-slate-700">Connect your Google account to continue</p>
               <p className="text-xs text-slate-400 mt-0.5">
-                Only used to create your Tasks list or Sheet. Cannot read, edit, or delete existing data.
+                Only used to create your Tasks list or Sheet. Read-only access is never requested.
               </p>
             </div>
             <button
               onClick={handleConnectGoogle}
-              className="px-5 py-2 text-sm font-medium rounded bg-blue-600 text-white hover:bg-blue-700 transition-colors shrink-0"
+              className="px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-all shadow-sm shrink-0"
             >
               Connect Google
             </button>
@@ -167,10 +162,10 @@ export default function ChatInterface({
         )}
         {needsGoogleOutput && showGoogleConnectedBanner && (
           <div
-            className="border-t border-slate-200 bg-green-50 px-4 py-3 transition-opacity duration-500"
+            className="border-t border-slate-100 bg-green-50 px-5 py-3 transition-opacity duration-500"
             style={{ opacity: bannerVisible ? 1 : 0 }}
           >
-            <p className="text-sm text-green-700">✓ Google account connected</p>
+            <p className="text-sm font-medium text-green-700">✓ Google account connected</p>
           </div>
         )}
 

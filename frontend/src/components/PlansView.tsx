@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import type { SavedPlan, SavedPlanSummary } from '../types'
 import ReactMarkdown from 'react-markdown'
-import { API_BASE } from '../api'
+import { apiFetch } from '../api'
 
 interface Props {
   onStartPlanning: () => void
@@ -38,7 +38,7 @@ function PlanCard({
     if (detail) return
     setLoading(true)
     try {
-      const r = await fetch(`${API_BASE}/api/plans/${summary.id}`, { credentials: 'include' })
+      const r = await apiFetch(`/api/plans/${summary.id}`)
       if (r.ok) setDetail(await r.json())
     } finally {
       setLoading(false)
@@ -46,7 +46,7 @@ function PlanCard({
   }
 
   async function handleDelete() {
-    await fetch(`${API_BASE}/api/plans/${summary.id}`, { method: 'DELETE', credentials: 'include' })
+    await apiFetch(`/api/plans/${summary.id}`, { method: 'DELETE' })
     onDelete(summary.id)
   }
 
@@ -158,7 +158,7 @@ export default function PlansView({ onStartPlanning }: Props) {
   const [error, setError] = useState(false)
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/plans`, { credentials: 'include' })
+    apiFetch(`/api/plans`)
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(data => setPlans(data.plans))
       .catch(() => setError(true))
