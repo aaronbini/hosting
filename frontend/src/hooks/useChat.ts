@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from 'react'
-import { EventData, MenuConfirmItem, Message, OutputOption } from '../types'
-import { API_BASE } from '../api'
+import { ActiveCard, EventData, MenuConfirmItem, Message, OutputOption } from '../types'
+import { apiFetch } from '../api'
 
 type WebSocketMessage =
   | { type: 'stream_start'; data: { completion_score: number; is_complete: boolean; event_data: EventData } }
@@ -25,6 +25,7 @@ interface UseChatReturn {
   isComplete: boolean
   isAwaitingReview: boolean
   excludedItems: Set<string>
+  activeCard: ActiveCard
   toggleExcludedItem: (name: string) => void
   connect: () => WebSocket | undefined
   sendMessage: (message: string) => void
@@ -41,6 +42,7 @@ interface UseChatOptions {
   initialEventData?: EventData | null
   initialCompletionScore?: number
   initialIsComplete?: boolean
+  initialActiveCard?: ActiveCard
 }
 
 export const useChat = (sessionId: string, options: UseChatOptions = {}): UseChatReturn => {
@@ -49,6 +51,7 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
     initialEventData = null,
     initialCompletionScore = 0,
     initialIsComplete = false,
+    initialActiveCard = null,
   } = options
   const [messages, setMessages] = useState<Message[]>(initialMessages)
   const [isLoading, setIsLoading] = useState(false)
@@ -59,6 +62,7 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
   const [ws, setWs] = useState<WebSocket | null>(null)
   const [isAwaitingReview, setIsAwaitingReview] = useState(false)
   const [excludedItems, setExcludedItems] = useState<Set<string>>(new Set())
+  const [activeCard, setActiveCard] = useState<ActiveCard>(initialActiveCard)
   const isStreamingRef = useRef(false)
   const pendingEventDataRef = useRef<EventData | null>(null)
   const pendingMessageRef = useRef<string | null>(null)
@@ -86,12 +90,14 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
         const data = JSON.parse(event.data) as WebSocketMessage
 
         if (data.type === 'stream_start') {
-          // Store event data but don't apply it yet - wait for first chunk
-          // This prevents upload panel from appearing before the message starts
           pendingEventDataRef.current = data.data.event_data
           setCompletionScore(data.data.completion_score)
           setIsComplete(data.data.is_complete)
           isStreamingRef.current = true
+          setActiveCard(null)
+          // Always open a fresh message slot so stream_chunk always appends cleanly,
+          // regardless of whether the previous event was a user message or a button click.
+          setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: new Date() }])
         } else if (data.type === 'stream_chunk') {
           // Apply pending event data on first chunk
           if (pendingEventDataRef.current) {
@@ -102,17 +108,10 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
           setMessages(prev => {
             const updated = [...prev]
             const lastMsg = updated[updated.length - 1]
-
-            // If we're streaming and last message is from assistant, append to it
-            // Otherwise, create a new assistant message (first chunk)
-            if (isStreamingRef.current && lastMsg?.role === 'assistant') {
-              updated[updated.length - 1] = {
-                ...lastMsg,
-                content: lastMsg.content + data.data.text
-              }
-            } else {
-              // First chunk - create new message
-              updated.push({ role: 'assistant', content: data.data.text, timestamp: new Date() })
+            // Always append — stream_start guarantees the last message is our fresh slot
+            updated[updated.length - 1] = {
+              ...lastMsg,
+              content: lastMsg.content + data.data.text
             }
             return updated
           })
@@ -167,28 +166,13 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
           setIsAwaitingReview(false)
           setIsLoading(false)
         } else if (data.type === 'output_selection') {
-          setMessages(prev => [...prev, {
-            role: 'assistant',
-            content: '',
-            outputOptions: data.options,
-            timestamp: new Date()
-          }])
+          setActiveCard({ type: 'output_selection', options: data.options })
           setIsLoading(false)
         } else if (data.type === 'menu_confirm_request') {
-          setMessages(prev => [...prev, {
-            role: 'assistant',
-            content: '',
-            menuConfirmRecipes: data.recipes,
-            timestamp: new Date()
-          }])
+          setActiveCard({ type: 'menu_confirm', recipes: data.recipes })
           setIsLoading(false)
         } else if (data.type === 'recipe_confirm_request') {
-          setMessages(prev => [...prev, {
-            role: 'assistant',
-            content: '',
-            recipeConfirmPrompt: true,
-            timestamp: new Date()
-          }])
+          setActiveCard({ type: 'recipe_confirm' })
           setIsLoading(false)
         }
       }
@@ -219,6 +203,7 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
     setIsLoading(true)
     setError(null)
 
+    setActiveCard(null)
     setMessages(prev => [...prev, {
       role: 'user',
       content: message,
@@ -247,7 +232,7 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
         timestamp: new Date()
       }])
 
-      const response = await fetch(`${API_BASE}/api/chat`, {
+      const response = await apiFetch(`/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -291,18 +276,21 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
 
   const confirmMenu = useCallback((ownRecipeNames: string[]) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
+    setActiveCard(null)
     setIsLoading(true)
     ws.send(JSON.stringify({ type: 'confirm_menu', data: ownRecipeNames }))
   }, [ws])
 
   const confirmRecipes = useCallback(() => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
+    setActiveCard(null)
     setIsLoading(true)
     ws.send(JSON.stringify({ type: 'confirm_recipes' }))
   }, [ws])
 
   const selectOutputs = useCallback((formats: string[]) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
+    setActiveCard(null)
     setIsLoading(true)
     ws.send(JSON.stringify({ type: 'select_outputs', data: formats }))
   }, [ws])
@@ -316,6 +304,7 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
     isComplete,
     isAwaitingReview,
     excludedItems,
+    activeCard,
     toggleExcludedItem,
     connect,
     sendMessage,

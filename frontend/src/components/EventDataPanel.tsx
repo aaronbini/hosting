@@ -27,16 +27,19 @@ export default function EventDataPanel({ eventData, completionScore }: Props) {
   }
 
   return (
-    <div className="w-80 bg-white border-l border-slate-200 p-6 overflow-y-auto shadow-lg">
-      <h2 className="text-xl font-bold text-slate-900 mb-6">Event Details</h2>
+    <div className="w-80 bg-white border-l border-slate-100 p-6 overflow-y-auto shadow-md">
+      <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-5">Event Details</h2>
 
       {/* Conversation Stage */}
       <div className="mb-4">
-        <span className={`text-xs font-semibold px-2 py-1 rounded ${
+        <span className={`inline-flex items-center text-xs font-semibold px-2.5 py-1 rounded-full ${
           eventData.conversation_stage === 'complete'
             ? 'text-green-700 bg-green-100'
-            : 'text-indigo-600 bg-indigo-50'
+            : 'text-indigo-600 bg-indigo-50 ring-1 ring-indigo-100'
         }`}>
+          {eventData.conversation_stage !== 'complete' && (
+            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 mr-1.5 animate-pulse" />
+          )}
           {stageLabels[eventData.conversation_stage] || eventData.conversation_stage}
         </span>
       </div>
@@ -55,9 +58,9 @@ export default function EventDataPanel({ eventData, completionScore }: Props) {
               {Math.round(completionScore * 100)}%
             </span>
           </div>
-          <div className="w-full bg-slate-200 rounded-full h-2">
+          <div className="w-full bg-slate-100 rounded-full h-2.5">
             <div
-              className={`h-2 rounded-full transition-all ${getCompletionColor()}`}
+              className={`h-2.5 rounded-full transition-all duration-500 ${getCompletionColor()}`}
               style={{ width: `${completionScore * 100}%` }}
             ></div>
           </div>
@@ -140,7 +143,7 @@ export default function EventDataPanel({ eventData, completionScore }: Props) {
               {eventData.meal_plan.recipes.map((recipe, idx: number) => (
                 <li key={idx} className="text-sm text-slate-600">
                   <div className="flex items-center gap-2">
-                    <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full flex-shrink-0"></span>
+                    <span className="w-2 h-2 bg-indigo-300 rounded-full flex-shrink-0"></span>
                     <span className="font-medium">{recipe.name}</span>
                   </div>
                   {recipe.status === 'placeholder' && (

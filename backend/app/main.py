@@ -18,10 +18,12 @@ from app.auth.jwt import create_access_token, decode_access_token_raw, get_curre
 from app.db.database import async_session_factory, engine, get_db
 from app.db.models import User
 from app.models.chat import ChatRequest, ChatResponse, MessageRole
+from app.agent.runner import run_agent
 from app.models.event import (
     ExtractionResult,
     OutputFormat,
     PreparationMethod,
+    Recipe,
     RecipeSourceType,
     RecipeStatus,
     RecipeType,
@@ -30,6 +32,8 @@ from app.services.ai_service import GeminiService
 from app.services.db_session_manager import db_session_manager
 from app.services.plan_manager import plan_manager
 from app.services.session_manager import SessionData
+from app.services.sheets_service import SheetsService
+from app.services.tasks_service import TasksService
 
 # Load environment variables (override=True ensures .env wins over any shell env vars)
 load_dotenv(override=True)
@@ -142,7 +146,6 @@ def apply_extraction(session: SessionData, extraction: ExtractionResult) -> None
 
     # 2. Apply recipe updates to meal plan
     if extraction.recipe_updates:
-        from app.models.event import Recipe, RecipeStatus
 
         for update in extraction.recipe_updates:
             if update.action == "add":
@@ -168,6 +171,20 @@ def apply_extraction(session: SessionData, extraction: ExtractionResult) -> None
                     if "new_name" in updates:
                         updates["name"] = updates.pop("new_name")
 
+                    # Never let the AI revert a COMPLETE recipe back to NAMED via a
+                    # spurious recipe_update (e.g. when user asks a clarifying question).
+                    # A recipe may only lose COMPLETE status if ingredients are explicitly
+                    # cleared or the user takes ownership (awaiting_user_input=True).
+                    updated_ingredients = updates.get("ingredients", recipe.ingredients)
+                    updated_awaiting = updates.get("awaiting_user_input", recipe.awaiting_user_input)
+                    if (
+                        recipe.status == RecipeStatus.COMPLETE
+                        and updates.get("status") == RecipeStatus.NAMED
+                        and updated_ingredients  # still has ingredients
+                        and not updated_awaiting
+                    ):
+                        updates.pop("status")
+
                     # Apply updates using model_copy
                     idx = event_data.meal_plan.recipes.index(recipe)
                     event_data.meal_plan.recipes[idx] = recipe.model_copy(update=updates)
@@ -184,7 +201,6 @@ def apply_extraction(session: SessionData, extraction: ExtractionResult) -> None
         if any(u.action in ("add", "remove") for u in extraction.recipe_updates):
             event_data.meal_plan.confirmed = False
             event_data.answered_questions["meal_plan"] = False
-            event_data.meal_plan.menu_confirm_clicked = False  # menu changed, allow card to reappear
 
     if extraction.meal_plan_confirmed:
         event_data.meal_plan.confirmed = True
@@ -796,7 +812,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     if (
                         pre_extraction_stage == "gathering"
                         and session.event_data.conversation_stage == "recipe_confirmation"
-                        and not session.event_data.meal_plan.menu_confirm_clicked
+                        and not session.event_data.meal_plan.menu_confirm_already_shown
                     ):
                         # All recipes ready to confirm (non-placeholder, non-awaiting)
                         confirmable = [
@@ -808,7 +824,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         if has_homemade:
                             session.event_data.conversation_stage = "gathering"
                             session.event_data.meal_plan.confirmed = False
-                            session.event_data.meal_plan.menu_confirm_clicked = True
+                            session.event_data.meal_plan.menu_confirm_shown_for_names = list({r.name for r in confirmable})
                             logger.info(
                                 "🃏 INTERCEPTED gathering→recipe_confirmation (session=%s) — "
                                 "showing menu_confirm_request with %d items",
@@ -832,13 +848,17 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     # any HOMEMADE recipes the user isn't providing themselves.
                     if session.event_data.conversation_stage == "recipe_confirmation":
                         await _auto_generate_recipes(session, ai_service)
+                        # After auto-generating, re-check stage transition.
+                        # Handles the case where the user confirmed via text before
+                        # recipes were auto-generated, so apply_extraction couldn't
+                        # advance the stage (is_complete was False then). Now that
+                        # ingredients exist, re-evaluate.
+                        if session.event_data.meal_plan.is_complete:
+                            session.event_data.conversation_stage = "selecting_output"
+                            session.event_data.compute_derived_fields()
 
                 # If we just transitioned to agent_running, hand off to the agent
                 if session.event_data.conversation_stage == "agent_running":
-                    from app.agent.runner import run_agent
-                    from app.services.sheets_service import SheetsService
-                    from app.services.tasks_service import TasksService
-
                     needs_google_output = (
                         OutputFormat.GOOGLE_TASKS in session.event_data.output_formats
                         or OutputFormat.GOOGLE_SHEET in session.event_data.output_formats
@@ -993,7 +1013,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     ]
                     if (
                         confirmable
-                        and not session.event_data.meal_plan.menu_confirm_clicked
+                        and not session.event_data.meal_plan.menu_confirm_already_shown
                         and len(confirmable) == len(recipes)  # all recipes are ready
                         and any(r.preparation_method == PreparationMethod.HOMEMADE for r in confirmable)
                     ):
@@ -1007,7 +1027,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 for r in confirmable
                             ],
                         })
-                        session.event_data.meal_plan.menu_confirm_clicked = True
+                        session.event_data.meal_plan.menu_confirm_shown_for_names = list({r.name for r in confirmable})
                 # After recipe_confirmation: if all resolved, send inline confirm card
                 elif session.event_data.conversation_stage == "recipe_confirmation":
                     has_pending = any(r.awaiting_user_input for r in session.event_data.meal_plan.recipes)

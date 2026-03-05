@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { API_BASE } from './api'
+import { apiFetch } from './api'
 import ChatInterface from './components/ChatInterface'
 import LoginPage from './components/LoginPage'
 import PlansView from './components/PlansView'
-import type { EventData, Message, OutputOption, User } from './types'
+import type { ActiveCard, EventData, Message, OutputOption, User } from './types'
 
 type AuthState = 'loading' | 'unauthenticated' | User
 type AppView = 'planner' | 'plans'
@@ -14,6 +14,7 @@ interface SessionInit {
   eventData: EventData | null
   completionScore: number
   isComplete: boolean
+  initialActiveCard: ActiveCard
 }
 
 // Output options mirror what the WS handler sends; needed to re-attach the picker on restore.
@@ -25,40 +26,34 @@ const OUTPUT_OPTIONS: OutputOption[] = [
 
 function buildRestoredMessages(
   history: { role: string; content: string }[],
-  stage: string,
 ): Message[] {
-  const messages: Message[] = history.map(m => ({
+  return history.map(m => ({
     role: m.role as 'user' | 'assistant',
     content: m.content,
     timestamp: new Date(),
   }))
-  if (stage === 'selecting_output') {
-    messages.push({
-      role: 'assistant',
-      content: '',
-      timestamp: new Date(),
-      outputOptions: OUTPUT_OPTIONS,
-    })
-  }
-  return messages
 }
 
 async function fetchSessionInit(sessionId: string): Promise<SessionInit> {
-  const r = await fetch(`${API_BASE}/api/sessions/${sessionId}`, { credentials: 'include' })
+  const r = await apiFetch(`/api/sessions/${sessionId}`)
   if (!r.ok) throw new Error('Session not found')
   const data = await r.json()
   const stage: string = data.event_data?.conversation_stage ?? 'gathering'
+  const initialActiveCard: ActiveCard = stage === 'selecting_output'
+    ? { type: 'output_selection', options: OUTPUT_OPTIONS }
+    : null
   return {
     sessionId,
-    messages: buildRestoredMessages(data.conversation_history ?? [], stage),
+    messages: buildRestoredMessages(data.conversation_history ?? []),
     eventData: data.event_data ?? null,
     completionScore: data.event_data?.completion_score ?? 0,
     isComplete: data.event_data?.is_complete ?? false,
+    initialActiveCard,
   }
 }
 
 async function createNewSession(): Promise<SessionInit> {
-  const r = await fetch(`${API_BASE}/api/sessions`, { method: 'POST', credentials: 'include' })
+  const r = await apiFetch(`/api/sessions`, { method: 'POST' })
   if (!r.ok) throw new Error('Failed to create session')
   const data = await r.json()
   return {
@@ -67,15 +62,16 @@ async function createNewSession(): Promise<SessionInit> {
     eventData: null,
     completionScore: 0,
     isComplete: false,
+    initialActiveCard: null,
   }
 }
 
 function Spinner({ label }: { label: string }) {
   return (
-    <div className="flex items-center justify-center h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
+    <div className="flex items-center justify-center h-screen bg-slate-50">
       <div className="text-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto mb-4" />
-        <p className="text-indigo-600 font-medium">{label}</p>
+        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-500 mx-auto mb-4" />
+        <p className="text-slate-500 font-medium text-sm">{label}</p>
       </div>
     </div>
   )
@@ -93,17 +89,20 @@ function AppHeader({
   onLogout: () => void
 }) {
   return (
-    <header className="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-6 shrink-0 shadow-sm">
-      <span className="text-lg font-bold text-slate-900 mr-2">Hosting Helper</span>
-      <nav className="flex gap-1">
+    <header className="bg-white border-b border-slate-200 px-6 flex items-center gap-6 shrink-0 shadow-sm">
+      <div className="flex items-center gap-2 mr-2 py-4">
+        <span className="text-lg leading-none">🍽️</span>
+        <span className="text-sm font-semibold text-slate-800 tracking-tight">Hosting Helper</span>
+      </div>
+      <nav className="flex self-stretch">
         {(['planner', 'plans'] as AppView[]).map(v => (
           <button
             key={v}
             onClick={() => onViewChange(v)}
-            className={`px-4 py-1.5 text-sm font-medium rounded transition-colors ${
+            className={`px-4 text-sm font-medium border-b-2 transition-colors ${
               view === v
-                ? 'bg-indigo-100 text-indigo-700'
-                : 'text-slate-600 hover:bg-slate-100'
+                ? 'border-indigo-600 text-indigo-700'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
             }`}
           >
             {v === 'planner' ? 'Planner' : 'My Plans'}
@@ -112,12 +111,12 @@ function AppHeader({
       </nav>
       <div className="ml-auto flex items-center gap-3">
         {user.picture && (
-          <img src={user.picture} alt={user.name} className="w-7 h-7 rounded-full" />
+          <img src={user.picture} alt={user.name} className="w-7 h-7 rounded-full ring-2 ring-slate-100" />
         )}
-        <span className="text-sm text-slate-700 hidden sm:inline">{user.name}</span>
+        <span className="text-sm text-slate-600 hidden sm:inline">{user.name}</span>
         <button
           onClick={onLogout}
-          className="text-sm text-slate-500 hover:text-slate-800 transition-colors"
+          className="text-xs text-slate-400 hover:text-slate-700 transition-colors px-2 py-1 rounded hover:bg-slate-100"
         >
           Sign out
         </button>
@@ -134,7 +133,7 @@ function App() {
   const initializingRef = useRef(false)
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/auth/me`, { credentials: 'include' })
+    apiFetch(`/api/auth/me`)
       .then(r => (r.ok ? r.json() : null))
       .then(user => setAuthState(user ?? 'unauthenticated'))
       .catch(() => setAuthState('unauthenticated'))
@@ -146,7 +145,7 @@ function App() {
     initializingRef.current = true
 
     async function initSession() {
-      const r = await fetch(`${API_BASE}/api/sessions`, { credentials: 'include' })
+      const r = await apiFetch(`/api/sessions`)
       const { sessions } = await r.json() as { sessions: { session_id: string; stage: string }[] }
       const active = sessions.find(s => s.stage !== 'complete')
       if (active) return fetchSessionInit(active.session_id)
@@ -168,7 +167,7 @@ function App() {
   }, [])
 
   const handleLogout = useCallback(async () => {
-    await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', credentials: 'include' })
+    await apiFetch(`/api/auth/logout`, { method: 'POST' })
     setAuthState('unauthenticated')
     setSessionInit(null)
     initializingRef.current = false
@@ -184,7 +183,7 @@ function App() {
 
   if (sessionError) {
     return (
-      <div className="flex items-center justify-center h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
+      <div className="flex items-center justify-center h-screen bg-slate-50">
         <div className="text-center">
           <p className="text-red-600 mb-4">Failed to initialize session</p>
           <button
@@ -199,7 +198,7 @@ function App() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-gradient-to-br from-blue-50 to-indigo-100">
+    <div className="h-screen flex flex-col bg-slate-50">
       <AppHeader user={user} view={view} onViewChange={setView} onLogout={handleLogout} />
 
       {view === 'planner' && sessionInit ? (
@@ -210,6 +209,7 @@ function App() {
           initialEventData={sessionInit.eventData}
           initialCompletionScore={sessionInit.completionScore}
           initialIsComplete={sessionInit.isComplete}
+          initialActiveCard={sessionInit.initialActiveCard}
           onNewSession={handleNewSession}
         />
       ) : view === 'plans' ? (

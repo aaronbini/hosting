@@ -80,7 +80,13 @@ class MealPlan(BaseModel):
 
     recipes: List[Recipe] = Field(default_factory=list)
     confirmed: bool = False  # User confirmed the full menu
-    menu_confirm_clicked: bool = False  # True after menu_confirm_request card has been sent
+    menu_confirm_shown_for_names: List[str] = Field(default_factory=list)
+
+    @property
+    def menu_confirm_already_shown(self) -> bool:
+        """True if the menu_confirm_request card has already been shown for the current recipe set."""
+        current_names = {r.name for r in self.recipes}
+        return bool(current_names) and current_names == set(self.menu_confirm_shown_for_names)
 
     @property
     def pending_user_recipes(self) -> List[Recipe]:

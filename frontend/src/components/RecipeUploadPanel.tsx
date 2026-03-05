@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { Recipe } from '../types'
-import { API_BASE } from '../api'
+import { apiFetch } from '../api'
 
 
 interface UploadResult {
@@ -43,8 +43,8 @@ export default function RecipeUploadPanel({ sessionId, recipes, onUploadComplete
     formData.append('file', file)
 
     try {
-      const res = await fetch(
-        `${API_BASE}/api/sessions/${sessionId}/upload-recipe?dish_name=${encodeURIComponent(selectedDish)}`,
+      const res = await apiFetch(
+        `/api/sessions/${sessionId}/upload-recipe?dish_name=${encodeURIComponent(selectedDish)}`,
         { method: 'POST', body: formData }
       )
 

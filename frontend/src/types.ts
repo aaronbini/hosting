@@ -75,10 +75,13 @@ export interface Message {
   content: string
   timestamp: Date
   shoppingList?: any
-  outputOptions?: OutputOption[]
-  menuConfirmRecipes?: MenuConfirmItem[]
-  recipeConfirmPrompt?: boolean
 }
+
+export type ActiveCard =
+  | { type: 'menu_confirm'; recipes: MenuConfirmItem[] }
+  | { type: 'recipe_confirm' }
+  | { type: 'output_selection'; options: OutputOption[] }
+  | null
 
 export interface SavedPlanSummary {
   id: string
