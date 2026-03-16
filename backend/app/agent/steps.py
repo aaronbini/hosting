@@ -20,7 +20,14 @@ from typing import TYPE_CHECKING
 
 from app.agent.state import AgentStage, AgentState, GoogleTasksResult
 from app.models.event import PreparationMethod
-from app.models.shopping import DishCategory, DishIngredients, DishServingSpec, RecipeIngredient, QuantityUnit
+from app.models.shopping import (
+    DishCategory,
+    DishIngredients,
+    DishServingSpec,
+    QuantityUnit,
+    RecipeIngredient,
+    display_unit,
+)
 from app.services.quantity_engine import calculate_all_serving_specs
 
 # Items that are always assumed available and should never appear on a shopping list.
@@ -392,7 +399,7 @@ async def generate_recipes(
         lines.append("**Ingredients**")
         for ing in dish.ingredients:
             qty = math.ceil(ing.quantity)
-            lines.append(f"- {qty} {ing.unit.value} {ing.name}")
+            lines.append(f"- {qty} {display_unit(ing.quantity, ing.unit)} {ing.name}")
         lines.append("")
 
         if instructions:
@@ -431,7 +438,7 @@ async def format_chat_output(state: AgentState) -> AgentState:
         for item in items:
             # Always round up to the nearest whole number for shopping clarity
             qty = math.ceil(item.total_quantity)
-            lines.append(f"- {item.name}: {qty} {item.unit.value}")
+            lines.append(f"- {item.name}: {qty} {display_unit(item.total_quantity, item.unit)}")
         lines.append("")
 
     state.formatted_chat_output = "\n".join(lines)

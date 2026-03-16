@@ -15,6 +15,8 @@ from app.models.shopping import (
     DishCategory,
     DishIngredients,
     DishServingSpec,
+    GroceryCategory,
+    QuantityUnit,
     RecipeIngredient,
     ShoppingList,
 )
@@ -72,19 +74,22 @@ CATEGORY_SERVING_HINTS: dict[str, str] = {
 _MAX_CONTENT_CHARS = 30_000
 
 INGREDIENT_UNIT_RULES = """
-- Use shopping-friendly units that match how items are actually sold:
-    * Don't present anything in teaspoons, tablespoons, or cups — these are not standard for grocery shopping and lead to confusion.
+- Use standard home-cooking units a recipe author would use:
     * Proteins (meat, fish): oz or lbs
-    * Dry goods (pasta, rice, flour, sugar, breadcrumbs, oats, lentils): oz or lbs — NEVER cups
-    * Fresh produce (vegetables, fruit): oz, lbs, count, or bunch as appropriate
-    * Liquids (broth, wine, cream, milk): fl oz, pints, quarts, or liters
-    * Small liquid amounts (oil, sauces, condiments): fl oz
-    * Spices and seasonings: oz
-    * Eggs, lemons, onions, whole items: count
-    * Garlic: bulbs or heads. if cloves are specified in the recipe, convert to bulbs (1 bulb ≈ 10 cloves).
+    * Produce (vegetables, fruit): count, lbs, oz, or bunch as appropriate
+    * Large dry goods (pasta, rice, grains, lentils): oz or lbs
+    * Baking ingredients (flour, sugar, breadcrumbs, oats, cocoa): cups or oz
+    * Butter: tbsp or cups
+    * Oils, vinegars, sauces, condiments: cups preferred if over 2 fl oz, otherwise tbsp or tsp
+    * Liquids (broth, wine, cream, milk, juice): cups or fl oz
+    * Salt and spices: tsp or tbsp
+    * Fresh herbs (basil, cilantro, parsley, rosemary, thyme, mint, dill, chives, sage, tarragon, oregano): bunch
+    * Dried herbs: tsp or tbsp
+    * Garlic: cloves
+    * Dry yeast: tsp or tbsp
+    * Eggs and whole items: count
     * Canned goods: cans
     * Packaged items: packages
-- Do NOT use cups for any solid or dry ingredient.
 - Do NOT include water — it is never a grocery item.
 """
 
@@ -128,6 +133,102 @@ class _AggregatedItems(BaseModel):
     """Gemini returns just the items list; we build ShoppingList around it."""
 
     items: list[AggregatedIngredient]
+
+
+class _IngredientCanonical(BaseModel):
+    """Canonical form for one raw ingredient name."""
+
+    original_name: str
+    canonical_name: str
+    grocery_category: GroceryCategory
+    is_liquid: bool = False
+    is_fresh_herb: bool = False
+
+
+class _IngredientCanonicals(BaseModel):
+    mappings: list[_IngredientCanonical]
+
+
+# Factors to convert any volume unit → fl oz (used for liquid aggregation).
+# OZ is included because recipes routinely write "oz" when they mean "fl oz" for liquids.
+_TO_FL_OZ: dict[QuantityUnit, float] = {
+    QuantityUnit.TSP: 1 / 6,
+    QuantityUnit.TBSP: 0.5,
+    QuantityUnit.FL_OZ: 1.0,
+    QuantityUnit.OZ: 1.0,
+    QuantityUnit.CUPS: 8.0,
+    QuantityUnit.PINTS: 16.0,
+    QuantityUnit.QUARTS: 32.0,
+    QuantityUnit.GALLONS: 128.0,
+    QuantityUnit.LITERS: 33.814,
+    QuantityUnit.ML: 0.033814,
+}
+
+# Factors to convert any weight unit → oz (used for non-liquid aggregation).
+_TO_OZ: dict[QuantityUnit, float] = {
+    QuantityUnit.OZ: 1.0,
+    QuantityUnit.LBS: 16.0,
+    QuantityUnit.GRAMS: 0.035274,
+    QuantityUnit.KG: 35.274,
+}
+
+# Factors to convert cooking volume units → tsp (for non-liquid spices/baking ingredients).
+_TO_TSP: dict[QuantityUnit, float] = {
+    QuantityUnit.TSP: 1.0,
+    QuantityUnit.TBSP: 3.0,
+    QuantityUnit.CUPS: 48.0,
+}
+
+# Count-based units that should never be converted to weight or volume.
+_COUNT_UNITS: frozenset[QuantityUnit] = frozenset({
+    QuantityUnit.COUNT,
+    QuantityUnit.DOZEN,
+    QuantityUnit.BUNCH,
+    QuantityUnit.HEAD,
+    QuantityUnit.BULBS,
+    QuantityUnit.CLOVES,
+    QuantityUnit.SLICES,
+    QuantityUnit.CANS,
+    QuantityUnit.BOTTLES,
+    QuantityUnit.PACKAGES,
+})
+
+
+def _upgrade_unit(quantity: float, unit: QuantityUnit, is_liquid: bool = False) -> tuple[float, QuantityUnit]:
+    """Normalise shopping-list units.
+
+    Liquids (oils, vinegars, creams, etc.) are purchased in ounces at the store,
+    so cups are converted to fl oz. All other liquid units stay as-is (no further
+    upgrades to cups or lbs).
+
+    Non-liquids follow standard upgrade rules (oz→lbs, tsp→tbsp→cups, etc.).
+    """
+    if unit == QuantityUnit.CLOVES:
+        # Garlic is sold by the bulb — always round up so the shopper buys enough.
+        # The formatter applies math.ceil to total_quantity, so 0.375 → 1 bulb, 1.125 → 2 bulbs.
+        return quantity / 8, QuantityUnit.BULBS
+
+    if is_liquid:
+        if unit == QuantityUnit.CUPS:
+            return quantity * 8, QuantityUnit.FL_OZ
+        return quantity, unit
+
+    if unit == QuantityUnit.OZ and quantity >= 16:
+        return quantity / 16, QuantityUnit.LBS
+    if unit == QuantityUnit.TSP:
+        if quantity >= 12:  # ≥ 4 tbsp = ¼ cup → display as cups
+            return quantity / 48, QuantityUnit.CUPS
+        if quantity >= 3:
+            return quantity / 3, QuantityUnit.TBSP
+    if unit == QuantityUnit.TBSP and quantity >= 4:  # ≥ ¼ cup → cups
+        return quantity / 16, QuantityUnit.CUPS
+    if unit == QuantityUnit.FL_OZ and quantity >= 8:
+        return quantity / 8, QuantityUnit.CUPS
+    if unit == QuantityUnit.ML and quantity >= 1000:
+        return quantity / 1000, QuantityUnit.LITERS
+    if unit == QuantityUnit.GRAMS and quantity >= 1000:
+        return quantity / 1000, QuantityUnit.KG
+    return quantity, unit
 
 
 class _ExtractedRecipe(BaseModel):
@@ -599,19 +700,24 @@ class GeminiService:
                       BEVERAGES: When user mentions beverages, add them as recipes with recipe_type="drink":
                       - Add each beverage type as a separate recipe (e.g., "Wine", "Beer", "Sparkling Water")
                       - Set recipe_type to "drink"
-                      - Set preparation_method to "store_bought" (user can override later if making cocktails/infused drinks from scratch)
+                      - Set preparation_method based on beverage type:
+                          "store_bought" — single-ingredient purchased beverages: wine, beer, cider,
+                            sparkling water, juice, soda, kombucha, a specific spirit served neat/on ice.
+                          "homemade" — crafted/mixed cocktails that require combining ingredients:
+                            Negroni, Mojito, Margarita, Aperol Spritz, Old Fashioned, Sangria, etc.
                       - Set status to "named" (the agent will generate quantities later)
                       - Set awaiting_user_input to false
                       - Also populate beverages_preferences field for backward compatibility
                       Example: User says "We'll have wine and beer" →
                         {{"recipe_name": "Wine", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "store_bought", "awaiting_user_input": false}}
                         {{"recipe_name": "Beer", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "store_bought", "awaiting_user_input": false}}
+                      Example: User says "We'll serve Negroni Sbagliatos" →
+                        {{"recipe_name": "Negroni Sbagliato", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "homemade", "awaiting_user_input": false}}
 
                       CONFIRMING ASSISTANT-SUGGESTED BEVERAGES: When the previous assistant message
                       contained beverage suggestions and the user confirms them (e.g., "looks good",
                       "yes", "perfect") AND those beverages are not yet in the current meal plan:
-                      - Apply the same rules above — extract each specific, purchasable beverage as
-                        a separate recipe with recipe_type="drink" and preparation_method="store_bought".
+                      - Apply the same rules above (store_bought for simple, homemade for cocktails).
                       - If the assistant grouped beverages under a theme/collection label (e.g.,
                         "Italian Coastal Selection – Vermentino or Falanghina, Sparkling Water,
                         Negroni Sbagliato"), the label itself is NOT a beverage. NEVER add it as a
@@ -621,7 +727,7 @@ class GeminiService:
                       Falanghina, Sparkling Water, Negroni Sbagliato", user says "looks good" →
                         {{"recipe_name": "Vermentino", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "store_bought", "awaiting_user_input": false}}
                         {{"recipe_name": "Sparkling Water", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "store_bought", "awaiting_user_input": false}}
-                        {{"recipe_name": "Negroni Sbagliato", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "store_bought", "awaiting_user_input": false}}
+                        {{"recipe_name": "Negroni Sbagliato", "action": "add", "status": "named", "recipe_type": "drink", "preparation_method": "homemade", "awaiting_user_input": false}}
 
                       FOOD ITEMS: For food dishes:
                       - Set recipe_type to "food" (this is the default, so you can omit it)
@@ -974,13 +1080,13 @@ class GeminiService:
         logger.info(
             "🤖 AI CALL: generate_recipe_instructions_batch (dishes=%d, model=%s)",
             len(dishes),
-            self.model_name,
+            self.fast_model_name,
         )
         result: _RecipeDetailsBatch = await self._async_json_call(
             prompt,
             _RecipeDetailsBatch,
             temperature=0.4,
-            model=self.model_name,
+            model=self.fast_model_name,
         )
         logger.info(
             "✅ AI RESPONSE: generate_recipe_instructions_batch → %d dishes",
@@ -1075,26 +1181,32 @@ class GeminiService:
         )
 
         if is_beverage:
-            prompt = f"""You are a professional chef. Provide the ingredient list for this BEVERAGE:
+            prompt = f"""You are a professional beverage buyer. Provide the shopping ingredient list for:
 
                     Beverage: {spec.dish_name}
-                    Dish category: {spec.dish_category}
-                    Adult servings: {spec.adult_servings}
-                    Child servings: {spec.child_servings}
-                    Total servings: {spec.total_servings}
+                    Individual drink servings to provide: {spec.total_servings}
 
-                    CRITICAL: This is a BEVERAGE, not a food dish. Return ONLY the beverage itself as the ingredient.
-                    Do NOT create a recipe or list ingredients for a sauce/dish that uses this beverage.
+                    IMPORTANT: "{spec.total_servings} servings" means {spec.total_servings} individual
+                    glasses/pours to serve — NOT {spec.total_servings} bottles or cans.
 
-                    {dietary_note}Rules for beverages:
-                    - For wine: list "wine" (red/white/rosé as appropriate) in bottles
-                    - For beer: list "beer" in cans or bottles
-                    - For cocktails: list the spirits and mixers needed
-                    - For non-alcoholic: list the beverage (water, juice, soda, etc.)
-                    {serving_hint_line}
-                    {INGREDIENT_UNIT_RULES}
-                    - Use appropriate units: bottles for wine, cans/bottles for beer, liters for bulk drinks
-                    """
+                    There are two beverage types — determine which applies and respond accordingly:
+
+                    TYPE A — Simple purchase item (wine, beer, cider, sparkling water, juice, soda):
+                      Return ONLY the beverage itself as a single ingredient in purchase units.
+                      Convert servings → purchase units using standard sizes:
+                        Wine / sparkling wine: 5 fl oz per glass, 25 fl oz per bottle (~5 glasses/bottle)
+                        Beer / hard cider: 12 fl oz per serving, 1 can or bottle per serving
+                        Spirits (neat / on the rocks): 2 fl oz per pour, 25 fl oz per bottle (~12 pours/bottle)
+                        Sparkling water / juice: 10 fl oz per glass, 33.8 fl oz (1 liter) per bottle
+                      Use unit: bottles, cans, or liters. Do NOT use fl oz, cups, or pints.
+
+                    TYPE B — Mixed cocktail with a recipe (Negroni, Aperol Spritz, Mojito, etc.):
+                      Return the component ingredients (spirits, mixers, garnishes) in purchase units,
+                      proportioned for {spec.total_servings} cocktail servings.
+                      Use bottles/cans/liters/count as appropriate — do NOT use fl oz, cups, or pints
+                      for spirits or wines.
+
+                    {dietary_note}"""
         elif scale_factor is not None:
             prompt = f"""You are a professional chef. Scale this recipe to the target serving count.
 
@@ -1158,50 +1270,155 @@ class GeminiService:
         """
         Aggregate and deduplicate ingredients across all dishes.
 
-        Uses Gemini for fuzzy name matching (handles synonyms like
-        "spring onions" vs "scallions" or "tinned tomatoes" vs "canned tomatoes").
-        Returns a ShoppingList with quantities summed per ingredient.
+        Two-pass approach:
+        1. Python pre-sums by exact (name, unit) key — exact arithmetic, no AI.
+        2. Gemini maps raw names → canonical names (synonym detection only, no math).
+        3. Python merges groups by canonical name, sums, and upgrades units.
+
+        This prevents LLM arithmetic errors (e.g. 16+16 oz being returned as 40 oz).
+        Gemini is only asked to do what it's reliable at: language normalisation.
 
         Note: meal_plan, adult_count, child_count, total_guests are populated
         by the runner from AgentState — Gemini only returns the items list.
         """
-        logger.info("🤖 AI CALL: aggregate_ingredients (dishes=%d)", len(all_dish_ingredients))
-        dishes_json = json.dumps([d.model_dump(mode="json") for d in all_dish_ingredients], indent=2)
+        # --- Pass 1: exact-match pre-aggregation in Python ---
+        # key: (name.lower(), unit) → (total_quantity, grocery_category, dish_names)
+        exact: dict[tuple[str, QuantityUnit], tuple[float, GroceryCategory, set[str]]] = {}
+        for dish in all_dish_ingredients:
+            for ing in dish.ingredients:
+                key = (ing.name.strip().lower(), ing.unit)
+                if key in exact:
+                    qty, cat, dishes = exact[key]
+                    exact[key] = (qty + ing.quantity, cat, dishes | {dish.dish_name})
+                else:
+                    exact[key] = (ing.quantity, ing.grocery_category, {dish.dish_name})
 
-        prompt = f"""You are a grocery list builder. Aggregate the ingredient lists
-                    below into a single deduplicated shopping list.
+        # --- Pass 2: Gemini canonicalises names (no quantities, no arithmetic) ---
+        unique_names = list({name for name, _ in exact})
+        names_text = "\n".join(f"- {n}" for n in unique_names)
+        prompt = f"""Standardise the grocery ingredient names below.
 
                     Rules:
-                    - Combine identical or synonymous ingredients (e.g. treat "scallions" and
-                      "spring onions" as the same item; use the more common name).
-                    - Treat ingredient variants that differ only in specificity as the same item.
-                      Use the most specific name that covers all uses. Examples:
-                        "olive oil" + "extra virgin olive oil" → "extra virgin olive oil"
-                        "red wine" + "dry red wine" → "dry red wine"
-                        "white wine" + "dry white wine" → "dry white wine"
+                    - Map synonymous or near-identical names to one canonical name.
+                      Examples:
+                        "scallions" → "spring onions"
+                        "EVOO" → "olive oil"
+                        "extra virgin olive oil" → "olive oil"
                         "butter" + "unsalted butter" → "unsalted butter"
-                      Never list both a generic and a specific variant of the same ingredient.
-                    - Sum quantities for the same ingredient, converting to consistent units where
-                      needed (e.g. 4 tbsp + 2 tbsp = 6 tbsp; 8 oz + 8 oz = 1 lb).
-                    {INGREDIENT_UNIT_RULES}
-                    - Prefer lbs over oz when total is ≥ 16 oz.
-                    - Set appears_in to the list of dish names that use each ingredient.
-                    - Assign the most appropriate grocery_category to each item.
+                        "tinned tomatoes" → "canned tomatoes"
+                        "red wine" + "dry red wine" → "dry red wine"
+                    - Ingredients that are genuinely different must stay separate.
+                    - The canonical name should be the most common, readable form.
+                    - Return exactly one mapping entry per input name (even if unchanged).
+                    - Assign each canonical ingredient the most appropriate grocery_category.
+                    - Set is_liquid=true for any ingredient that is a liquid at room temperature:
+                      oils, vinegars, wine, spirits, sauces, broths, cream, milk, citrus juice, etc.
+                      Liquids should always be measured in oz, fl oz, or cups — never in lbs.
+                    - Set is_fresh_herb=true for fresh herbs: basil, cilantro, parsley, rosemary,
+                      thyme, mint, dill, chives, sage, tarragon, oregano, bay leaves, etc.
+                    - Ingredient cuts/forms should map to the whole item. E.g.:
+                        "orange slices" → "oranges"
+                        "lemon wedges" → "lemons"
+                        "apple chunks" → "apples"
+                        "cucumber rounds" → "cucumbers"
 
-                    Ingredient lists by dish:
-                    {dishes_json}
+                    Ingredient names:
+                    {names_text}
                     """
-        result: _AggregatedItems = await self._async_json_call(
-            prompt, _AggregatedItems, temperature=0.0, model=self.fast_model_name
+        logger.info(
+            "🤖 AI CALL: canonicalize_ingredient_names (%d unique names, model=%s)",
+            len(unique_names),
+            self.fast_model_name,
         )
-        logger.info("✅ AI RESPONSE: aggregate_ingredients → %d unique items", len(result.items))
-        # Construct ShoppingList — runner fills in guest counts from AgentState
+        canon_result: _IngredientCanonicals = await self._async_json_call(
+            prompt, _IngredientCanonicals, temperature=0.0, model=self.fast_model_name
+        )
+        logger.info(
+            "✅ AI RESPONSE: canonicalize_ingredient_names → %d mappings",
+            len(canon_result.mappings),
+        )
+
+        # Build lookup: original_name.lower() → (canonical_name, grocery_category, is_liquid, is_fresh_herb)
+        name_map: dict[str, tuple[str, GroceryCategory, bool, bool]] = {
+            m.original_name.strip().lower(): (m.canonical_name, m.grocery_category, m.is_liquid, m.is_fresh_herb)
+            for m in canon_result.mappings
+        }
+
+        # --- Pass 3: group by canonical name only (unit differences handled in pass 4) ---
+        # key: canonical_name.lower()
+        # value: (display_name, category, is_liquid, is_fresh_herb, [(quantity, unit, dish_set)])
+        grouped: dict[str, tuple[str, GroceryCategory, bool, bool, list[tuple[float, QuantityUnit, set[str]]]]] = {}
+        for (raw_name, unit), (quantity, category, dishes) in exact.items():
+            canon_name, canon_cat, is_liquid, is_fresh_herb = name_map.get(raw_name, (raw_name, category, False, False))
+            key = canon_name.strip().lower()
+            if key in grouped:
+                grouped[key][4].append((quantity, unit, dishes))
+            else:
+                grouped[key] = (canon_name, canon_cat, is_liquid, is_fresh_herb, [(quantity, unit, dishes)])
+
+        # --- Pass 4: normalise units, sum, upgrade, and build output ---
+        # Conversion factors for fresh-herb tsp/tbsp/cup → tbsp (1 bunch ≈ 4 tbsp loosely packed).
+        _HERB_TO_TBSP: dict[QuantityUnit, float] = {
+            QuantityUnit.TSP: 1 / 3,
+            QuantityUnit.TBSP: 1.0,
+            QuantityUnit.CUPS: 16.0,
+            QuantityUnit.BUNCH: 4.0,  # already in bunches but normalise via tbsp for summing
+        }
+        items: list[AggregatedIngredient] = []
+        for canon_name, category, is_liquid, is_fresh_herb, entries in grouped.values():
+            all_dishes: set[str] = set()
+            for _, _, d in entries:
+                all_dishes |= d
+
+            all_units = {unit for _, unit, _ in entries}
+
+            if is_fresh_herb:
+                # Fresh herbs: always output in bunches regardless of recipe unit.
+                # 1 bunch ≈ 4 tbsp loosely packed; math.ceil ensures shopper buys enough.
+                total_tbsp = sum(qty * _HERB_TO_TBSP.get(unit, 4.0) for qty, unit, _ in entries)
+                upgraded_qty, upgraded_unit = total_tbsp / 4, QuantityUnit.BUNCH
+            elif all_units <= _COUNT_UNITS:
+                # Count-based (bottles, cans, cloves→bulbs, etc.): sum the dominant unit.
+                unit_totals: dict[QuantityUnit, float] = {}
+                for qty, unit, _ in entries:
+                    unit_totals[unit] = unit_totals.get(unit, 0.0) + qty
+                best_unit = max(unit_totals, key=lambda u: unit_totals[u])
+                upgraded_qty, upgraded_unit = _upgrade_unit(unit_totals[best_unit], best_unit)
+            elif is_liquid:
+                # Liquid volume: normalize all to fl oz (OZ treated as fl oz for liquids).
+                total = sum(qty * _TO_FL_OZ.get(unit, 1.0) for qty, unit, _ in entries)
+                upgraded_qty, upgraded_unit = _upgrade_unit(total, QuantityUnit.FL_OZ, is_liquid=True)
+            elif all_units <= set(_TO_TSP):
+                # Non-liquid cooking volumes (spices, herbs, baking): normalize to tsp.
+                total = sum(qty * _TO_TSP[unit] for qty, unit, _ in entries)
+                upgraded_qty, upgraded_unit = _upgrade_unit(total, QuantityUnit.TSP)
+            elif all_units <= set(_TO_OZ):
+                # Weight units: normalize to oz.
+                total = sum(qty * _TO_OZ[unit] for qty, unit, _ in entries)
+                upgraded_qty, upgraded_unit = _upgrade_unit(total, QuantityUnit.OZ)
+            else:
+                # Mixed or incompatible units: sum within the dominant unit.
+                unit_totals = {}
+                for qty, unit, _ in entries:
+                    unit_totals[unit] = unit_totals.get(unit, 0.0) + qty
+                best_unit = max(unit_totals, key=lambda u: unit_totals[u])
+                upgraded_qty, upgraded_unit = _upgrade_unit(unit_totals[best_unit], best_unit)
+
+            items.append(AggregatedIngredient(
+                name=canon_name,
+                total_quantity=round(upgraded_qty, 2),
+                unit=upgraded_unit,
+                grocery_category=category,
+                appears_in=sorted(all_dishes),
+            ))
+
+        logger.info("aggregate_ingredients: %d unique items after canonicalization", len(items))
         return ShoppingList(
             meal_plan=[d.dish_name for d in all_dish_ingredients],
             adult_count=0,  # overwritten by runner
             child_count=0,  # overwritten by runner
             total_guests=0,  # overwritten by runner
-            items=result.items,
+            items=items,
         )
 
     async def apply_shopping_list_corrections(
@@ -1231,7 +1448,7 @@ class GeminiService:
                     - Maintain the same structure as the input.
                     """
         result: _AggregatedItems = await self._async_json_call(
-            prompt, _AggregatedItems, temperature=0.0
+            prompt, _AggregatedItems, temperature=0.0, model=self.fast_model_name
         )
         return ShoppingList(
             meal_plan=shopping_list.meal_plan,

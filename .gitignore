@@ -75,3 +75,5 @@ local/*
 #Claude Code files that don't need to be tracked
 .claude/
 DEPLOYMENT.md
+
+cloud-sql-proxy

@@ -264,7 +264,7 @@ class TestSelectOutputs:
             )
         )
         with _ws_patched(session) as (client, _):
-            with patch("app.agent.runner.run_agent", run_agent_mock):
+            with patch("app.main.run_agent", run_agent_mock):
                 with client.websocket_connect(WS_PATH, cookies=COOKIES) as ws:
                     ws.send_json({"type": "select_outputs", "data": ["in_chat"]})
                     # Two event_data_update messages: before + after run_agent
@@ -282,7 +282,7 @@ class TestSelectOutputs:
             )
         )
         with _ws_patched(session) as (client, _):
-            with patch("app.agent.runner.run_agent", run_agent_mock):
+            with patch("app.main.run_agent", run_agent_mock):
                 with client.websocket_connect(WS_PATH, cookies=COOKIES) as ws:
                     ws.send_json({"type": "select_outputs", "data": ["in_chat"]})
                     ws.receive_json()
@@ -299,7 +299,7 @@ class TestSelectOutputs:
             )
         )
         with _ws_patched(session) as (client, _):
-            with patch("app.agent.runner.run_agent", run_agent_mock):
+            with patch("app.main.run_agent", run_agent_mock):
                 with client.websocket_connect(WS_PATH, cookies=COOKIES) as ws:
                     ws.send_json({"type": "select_outputs", "data": ["in_chat"]})
                     msg1 = ws.receive_json()
@@ -318,7 +318,7 @@ class TestSelectOutputs:
             )
         )
         with _ws_patched(session) as (client, _):
-            with patch("app.agent.runner.run_agent", run_agent_mock):
+            with patch("app.main.run_agent", run_agent_mock):
                 with client.websocket_connect(WS_PATH, cookies=COOKIES) as ws:
                     ws.send_json({"type": "select_outputs", "data": ["not_a_real_format"]})
 
@@ -396,7 +396,8 @@ class TestGatheringMessageFlow:
             )
         ]
         session = _make_session(stage="gathering", recipes=recipes)
-        session.event_data.meal_plan.menu_confirm_clicked = True  # Already shown
+        # Simulate already shown: set shown names to match current recipe names
+        session.event_data.meal_plan.menu_confirm_shown_for_names = [r.name for r in recipes]
 
         with _ws_patched(session) as (client, _):
             with client.websocket_connect(WS_PATH, cookies=COOKIES) as ws:
