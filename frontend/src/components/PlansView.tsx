@@ -2,9 +2,11 @@ import { useState, useEffect } from 'react'
 import type { SavedPlan, SavedPlanSummary } from '../types'
 import ReactMarkdown from 'react-markdown'
 import { apiFetch } from '../api'
+import posthog from '../posthog'
 
 interface Props {
   onStartPlanning: () => void
+  userId?: string
 }
 
 function formatDate(iso: string) {
@@ -35,6 +37,12 @@ function PlanCard({
       return
     }
     setExpanded(true)
+    posthog.capture('plan viewed', {
+      plan_id: summary.id,
+      plan_name: summary.name,
+      total_guests: summary.event_data.total_guests,
+      event_type: summary.event_data.event_type,
+    })
     if (detail) return
     setLoading(true)
     try {
@@ -46,6 +54,11 @@ function PlanCard({
   }
 
   async function handleDelete() {
+    posthog.capture('plan deleted', {
+      plan_id: summary.id,
+      plan_name: summary.name,
+      total_guests: summary.event_data.total_guests,
+    })
     await apiFetch(`/api/plans/${summary.id}`, { method: 'DELETE' })
     onDelete(summary.id)
   }

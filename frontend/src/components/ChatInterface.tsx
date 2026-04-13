@@ -16,6 +16,7 @@ interface Props {
   initialIsComplete?: boolean
   initialActiveCard?: ActiveCard
   onNewSession: () => void
+  userId?: string
 }
 
 export default function ChatInterface({
@@ -26,6 +27,7 @@ export default function ChatInterface({
   initialIsComplete,
   initialActiveCard,
   onNewSession,
+  userId,
 }: Props) {
   const {
     messages,
@@ -45,7 +47,7 @@ export default function ChatInterface({
     confirmRecipes,
     selectOutputs,
     isConnected
-  } = useChat(sessionId, { initialMessages, initialEventData, initialCompletionScore, initialIsComplete, initialActiveCard })
+  } = useChat(sessionId, { initialMessages, initialEventData, initialCompletionScore, initialIsComplete, initialActiveCard, userId })
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const connectionAttempted = useRef(false)

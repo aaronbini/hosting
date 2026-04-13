@@ -4,6 +4,7 @@ import ChatInterface from './components/ChatInterface'
 import LoginPage from './components/LoginPage'
 import PlansView from './components/PlansView'
 import type { ActiveCard, EventData, Message, OutputOption, User } from './types'
+import posthog from './posthog'
 
 type AuthState = 'loading' | 'unauthenticated' | User
 type AppView = 'planner' | 'plans'
@@ -42,6 +43,11 @@ async function fetchSessionInit(sessionId: string): Promise<SessionInit> {
   const initialActiveCard: ActiveCard = stage === 'selecting_output'
     ? { type: 'output_selection', options: OUTPUT_OPTIONS }
     : null
+  posthog.capture('session restored', {
+    session_id: sessionId,
+    stage,
+    message_count: (data.conversation_history ?? []).length,
+  })
   return {
     sessionId,
     messages: buildRestoredMessages(data.conversation_history ?? []),
@@ -56,6 +62,9 @@ async function createNewSession(): Promise<SessionInit> {
   const r = await apiFetch(`/api/sessions`, { method: 'POST' })
   if (!r.ok) throw new Error('Failed to create session')
   const data = await r.json()
+  posthog.capture('session created', {
+    session_id: data.session_id,
+  })
   return {
     sessionId: data.session_id,
     messages: [],
@@ -141,9 +150,21 @@ function App() {
 
   useEffect(() => {
     if (typeof authState === 'string') return
+    const user = authState as User
+    posthog.identify(user.id, {
+      email: user.email,
+      name: user.name,
+    })
+    posthog.capture('user signed in', {
+      email: user.email,
+      name: user.name,
+    })
+  }, [authState])
+
+  useEffect(() => {
+    if (typeof authState === 'string') return
     if (initializingRef.current) return
     initializingRef.current = true
-
     async function initSession() {
       const r = await apiFetch(`/api/sessions`)
       const { sessions } = await r.json() as { sessions: { session_id: string; stage: string }[] }
@@ -164,7 +185,7 @@ function App() {
     createNewSession()
       .then(setSessionInit)
       .catch(() => setSessionError(true))
-  }, [])
+  }, [authState])
 
   const handleLogout = useCallback(async () => {
     await apiFetch(`/api/auth/logout`, { method: 'POST' })
@@ -211,9 +232,10 @@ function App() {
           initialIsComplete={sessionInit.isComplete}
           initialActiveCard={sessionInit.initialActiveCard}
           onNewSession={handleNewSession}
+          userId={user.id}
         />
       ) : view === 'plans' ? (
-        <PlansView onStartPlanning={() => setView('planner')} />
+        <PlansView onStartPlanning={() => setView('planner')} userId={user.id} />
       ) : null}
 
       <footer className="shrink-0 text-center py-2 text-xs text-slate-400">

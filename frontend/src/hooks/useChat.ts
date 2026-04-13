@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from 'react'
 import { ActiveCard, EventData, MenuConfirmItem, Message, OutputOption } from '../types'
 import { apiFetch } from '../api'
+import posthog from '../posthog'
 
 type WebSocketMessage =
   | { type: 'stream_start'; data: { completion_score: number; is_complete: boolean; event_data: EventData } }
@@ -43,6 +44,7 @@ interface UseChatOptions {
   initialCompletionScore?: number
   initialIsComplete?: boolean
   initialActiveCard?: ActiveCard
+  userId?: string
 }
 
 export const useChat = (sessionId: string, options: UseChatOptions = {}): UseChatReturn => {
@@ -52,6 +54,7 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
     initialCompletionScore = 0,
     initialIsComplete = false,
     initialActiveCard = null,
+    userId,
   } = options
   const [messages, setMessages] = useState<Message[]>(initialMessages)
   const [isLoading, setIsLoading] = useState(false)
@@ -154,6 +157,11 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
           const content = [data.formatted_output || 'Your results are ready.', data.formatted_recipes_output, ...extraLinks, conclusion]
             .filter(Boolean)
             .join('\n\n')
+          posthog.capture('shopping list generated', {
+            session_id: sessionId,
+            has_google_sheet: !!data.google_sheet_url,
+            has_google_tasks: !!data.google_tasks,
+          })
           setMessages(prev => [...prev, {
             role: 'assistant',
             content,
@@ -203,6 +211,11 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
     setIsLoading(true)
     setError(null)
 
+    posthog.capture('message sent', {
+      session_id: sessionId,
+      message_length: message.length,
+    })
+
     setActiveCard(null)
     setMessages(prev => [...prev, {
       role: 'user',
@@ -219,7 +232,7 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
       type: 'message',
       data: message
     }))
-  }, [ws])
+  }, [ws, userId, sessionId])
 
   const sendMessageRest = useCallback(async (message: string) => {
     setIsLoading(true)
@@ -269,31 +282,47 @@ export const useChat = (sessionId: string, options: UseChatOptions = {}): UseCha
 
   const approveShoppingList = useCallback(() => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
+    posthog.capture('shopping list approved', {
+      session_id: sessionId,
+      excluded_item_count: excludedItems.size,
+    })
     ws.send(JSON.stringify({ type: 'approve', excluded_items: [...excludedItems] }))
     setIsAwaitingReview(false)
     setExcludedItems(new Set())
-  }, [ws, excludedItems])
+  }, [ws, excludedItems, userId, sessionId])
 
   const confirmMenu = useCallback((ownRecipeNames: string[]) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
+    posthog.capture('menu confirmed', {
+      session_id: sessionId,
+      own_recipe_count: ownRecipeNames.length,
+    })
     setActiveCard(null)
     setIsLoading(true)
     ws.send(JSON.stringify({ type: 'confirm_menu', data: ownRecipeNames }))
-  }, [ws])
+  }, [ws, userId, sessionId])
 
   const confirmRecipes = useCallback(() => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
+    posthog.capture('recipes confirmed', {
+      session_id: sessionId,
+    })
     setActiveCard(null)
     setIsLoading(true)
     ws.send(JSON.stringify({ type: 'confirm_recipes' }))
-  }, [ws])
+  }, [ws, userId, sessionId])
 
   const selectOutputs = useCallback((formats: string[]) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
+    posthog.capture('output format selected', {
+      session_id: sessionId,
+      formats,
+      format_count: formats.length,
+    })
     setActiveCard(null)
     setIsLoading(true)
     ws.send(JSON.stringify({ type: 'select_outputs', data: formats }))
-  }, [ws])
+  }, [ws, userId, sessionId])
 
   return {
     messages,

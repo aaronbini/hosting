@@ -71,6 +71,7 @@ Thumbs.db       # Windows
 #local files
 notes.txt
 local/*
+agent-design.md
 
 #Claude Code files that don't need to be tracked
 .claude/
