@@ -8,12 +8,14 @@ A full-stack AI-powered assistant for planning food events of any type. Built wi
 hosting/
 ├── ARCHITECTURE.md          # Detailed architecture documentation
 ├── backend/                 # Python FastAPI backend
-│   ├── pyproject.toml       # Python dependencies (Poetry/PEP 621)
+│   ├── pyproject.toml       # Python dependencies (uv/PEP 621)
 │   └── app/
-│       ├── main.py          # FastAPI application
+│       ├── main.py          # FastAPI application + all routes
 │       ├── agent/           # Agent pipeline (steps + runner)
+│       ├── auth/            # Google OAuth login + JWT helpers
+│       ├── db/              # SQLAlchemy models + async engine
 │       ├── models/          # Pydantic models (event, chat, shopping)
-│       └── services/        # AI service + quantity engine + sessions
+│       └── services/        # AI, quantity engine, session managers
 └── frontend/                # Vite + React frontend
   ├── index.html
   ├── package.json
@@ -86,10 +88,15 @@ The frontend will be available at `http://localhost:5173`
 
 ## Features
 
+### Authentication
+- **Google OAuth 2.0** login — users sign in with their Google account
+- **JWT session cookies** for stateless auth after login
+- Sessions and plans are scoped to the authenticated user
+
 ### Conversation Engine
 - **Natural language processing** using Google Gemini
-- **Session-based conversations** with in-memory storage (TODO: persistent datastore)
-- **WebSocket support** for real-time chat with REST fallback
+- **Persistent sessions** stored in PostgreSQL (survive server restarts)
+- **WebSocket support** for real-time streaming chat with REST fallback
 - **Automatic data extraction** from user messages
 - **Agent pipeline** that builds a shopping list after menu/recipe confirmation
 
@@ -117,71 +124,59 @@ The frontend will be available at `http://localhost:5173`
 ## TODO Items
 
 ### Backend
-- [ ] Persistent session storage (Redis/PostgreSQL)
 - [ ] Session expiration and cleanup
-- [ ] BYOK (Bring Your Own Key) support for multiple AI providers
-- [ ] Streaming responses from Gemini
-- [ ] Better NLP for data extraction (spaCy/Transformer-based)
+- [ ] Google Sheets output (currently a stub; Google Tasks is fully implemented)
+- [ ] Async recipe file upload processing
+- [ ] RAG integration for recipe quality
 - [ ] Event-type-specific completion logic
-- [ ] Error handling and retry logic for API failures
-- [ ] Rate limiting and authentication
-- [ ] Tests and integration tests
+- [ ] Rate limiting
 
 ### Frontend
 - [ ] WebSocket reconnection logic
-- [ ] Message queuing for offline support
 - [ ] Connection status indicators
-- [ ] Copy/export functionality for event data
-- [ ] Settings/preferences panel
-- [ ] Multi-language support
 - [ ] Dark mode
 - [ ] Tests and E2E tests
 
-### Architecture
-- [ ] Implement template-based sheet generation for Google Sheets
-- [ ] Integrate with calculation engine for food quantities
-- [ ] Add event timeline and prep schedule generation
-- [ ] Budget breakdown and cost analysis
-
 ## API Documentation
 
-### REST Endpoints
-
-#### Create Session
+### Auth Endpoints
 ```
-POST /api/sessions
-Response: { "session_id": "uuid", "message": "..." }
-```
-
-#### Get Session
-```
-GET /api/sessions/{session_id}
-Response: { "session_id": "...", "event_data": {...}, ... }
+GET  /api/auth/login          # Redirect to Google OAuth
+GET  /api/auth/callback       # OAuth callback, sets JWT cookie
+GET  /api/auth/me             # Current user info
+POST /api/auth/logout         # Clear session cookie
 ```
 
-#### Chat
+### Session Endpoints
 ```
-POST /api/chat
-Body: {
-  "session_id": "uuid",
-  "message": "user message"
-}
-Response: {
-  "message": "assistant response",
-  "completion_score": 0.6,
-  "is_complete": false,
-  "event_data": {...}
-}
+POST   /api/sessions                          # Create session
+GET    /api/sessions                          # List user's sessions
+GET    /api/sessions/{session_id}             # Get session state
+DELETE /api/sessions/{session_id}             # Delete session
+POST   /api/chat                              # REST chat (non-streaming)
 ```
 
-#### Delete Session
+### Recipe Endpoints
 ```
-DELETE /api/sessions/{session_id}
-Response: { "message": "Session deleted" }
+POST /api/sessions/{session_id}/extract-recipe  # Extract recipe from URL
+POST /api/sessions/{session_id}/upload-recipe   # Upload recipe file
 ```
 
-### WebSocket Endpoint
+### Google Integration
+```
+GET /api/auth/google/status    # Check Google Tasks auth status
+GET /api/auth/google/start     # Start Google OAuth for Tasks/Sheets
+GET /api/auth/google/callback  # Google OAuth callback
+```
 
+### Saved Plans
+```
+GET    /api/plans              # List user's saved plans
+GET    /api/plans/{plan_id}    # Get a saved plan
+DELETE /api/plans/{plan_id}    # Delete a saved plan
+```
+
+### WebSocket
 ```
 WS /ws/chat/{session_id}
 
@@ -193,10 +188,9 @@ Server responds with streaming and agent messages:
 
 ## Development Notes
 
-- Backend uses in-memory session storage for development. Conversations are lost on server restart.
+- Requires a running PostgreSQL instance. Set `DATABASE_URL` in `.env`.
 - WebSocket connections work on localhost; use HTTPS/WSS for production.
-- CORS is currently open (`*`) - configure properly for production.
-- All major TODOs are marked with `# TODO:` comments in the code.
+- CORS origins are configured via `FRONTEND_URL` env var.
 
 ## License
 
