@@ -54,4 +54,4 @@ Stage transitions + meal plan merging happen in `apply_extraction()` in `main.py
 ## Known Issues
 
 - `generate_response()` (non-streaming) exists for REST fallback only
-- Google Sheet creation is a stub; Google Tasks is fully implemented with OAuth
+- Google Sheets and Google Tasks both fully implemented with OAuth

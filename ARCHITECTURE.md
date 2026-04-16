@@ -96,7 +96,7 @@ All step functions in `agent/steps.py` are pure (no side effects) to simplify te
 
 ## Future / Not Yet Implemented
 
-- **Google Sheets output** — `sheets_service.py` is a stub; the OAuth scope is wired but sheet generation is not built
+- **Google Sheets output** — fully implemented (`sheets_service.py`): creates a formula-driven spreadsheet with Party Overview + Shopping List tabs, quantity formulas that scale with guest count edits, and per-item checkboxes
 - **Async recipe upload processing** — see `ASYNC_UPLOAD_ARCHITECTURE.md`
 - **RAG for recipe quality** — see `RAG_DESIGN.md`
 - **Performance optimization** — batching recipe generation calls; see `PERFORMANCE_OPTIMIZATION.md`

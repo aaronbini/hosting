@@ -125,7 +125,7 @@ The frontend will be available at `http://localhost:5173`
 
 ### Backend
 - [ ] Session expiration and cleanup
-- [ ] Google Sheets output (currently a stub; Google Tasks is fully implemented)
+- [ ] Google Sheets / Google Tasks: surface connection UI more prominently
 - [ ] Async recipe file upload processing
 - [ ] RAG integration for recipe quality
 - [ ] Event-type-specific completion logic
