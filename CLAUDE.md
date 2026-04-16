@@ -43,11 +43,15 @@ Stage transitions + meal plan merging happen in `apply_extraction()` in `main.py
 - `services/ai_service.py` — GeminiService (chat, extraction, recipe extraction, agent Gemini calls)
 - `services/quantity_engine.py` — per-person serving multiplier lookup by DishCategory
 - `services/tasks_service.py` — TasksService (Google Tasks OAuth-backed list creation)
-- `services/session_manager.py` — in-memory SessionData (stores event_data, history, agent_state, google_credentials)
+- `services/session_manager.py` — in-memory `SessionData` runtime container (event_data, history, agent_state, google_credentials)
+- `services/db_session_manager.py` — `DbSessionManager`: PostgreSQL-backed CRUD for sessions (persists event_data + conversation_history as JSONB per turn)
+- `db/database.py` — SQLAlchemy async engine + `get_db` dependency
+- `db/models.py` — ORM models: `User`, `AppSession`, `SavedPlan`
+- `auth/google_login.py` — Google OAuth login flow
+- `auth/jwt.py` — JWT session cookie helpers
 - `agent/state.py` — AgentState, `agent/steps.py` — pure step functions, `agent/runner.py` — WS orchestrator
 
 ## Known Issues
 
-- Sessions: in-memory only, no persistence
 - `generate_response()` (non-streaming) exists for REST fallback only
-- Google Sheet creation is a stub; Google Tasks is fully implemented with OAuth
+- Google Sheets and Google Tasks both fully implemented with OAuth
